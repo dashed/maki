@@ -44,6 +44,7 @@ use crate::components::scrollbar;
 use crate::components::search_modal::{SearchAction, SearchModal};
 use crate::components::status_bar::StatusBar;
 use crate::components::theme_picker::{ThemePicker, ThemePickerAction};
+use crate::components::thinking_picker::{ThinkingPicker, ThinkingPickerAction};
 use crate::components::usage_modal::{UsageFetchState, UsageModal};
 use crate::components::{
     Action, DisplayMessage, DisplayRole, ExitRequest, Overlay, RetryInfo, Status, is_ctrl,
@@ -86,6 +87,7 @@ const AUTH_EXPIRED_MSG: &str =
     "Token expired. Run `maki auth login` in another terminal, then press Enter to retry.";
 const FLASH_NO_PLAN: &str = "No plan file";
 const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
+const THINKING_UNSUPPORTED_MSG: &str = "Thinking requires a model that supports it";
 const EFFORT_UNSUPPORTED_MSG: &str = "Effort requires a model that supports thinking";
 const EFFORT_BUDGET_ONLY_MSG: &str =
     "This provider sets thinking by token budget, use /thinking <tokens>";
@@ -146,6 +148,7 @@ pub struct App {
     pub(super) task_picker: ListPicker<TaskEntry>,
     pub(super) task_picker_original: Option<usize>,
     pub(super) theme_picker: ThemePicker,
+    pub(super) thinking_picker: ThinkingPicker,
     pub(super) model_picker: ModelPicker,
     pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
@@ -237,6 +240,7 @@ impl App {
             task_picker: ListPicker::new(),
             task_picker_original: None,
             theme_picker: ThemePicker::new(),
+            thinking_picker: ThinkingPicker::new(),
             model_picker: ModelPicker::new(available_models),
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
@@ -663,6 +667,18 @@ impl App {
             return Some(match self.theme_picker.handle_key(key) {
                 ThemePickerAction::Consumed => vec![],
                 ThemePickerAction::Closed => vec![],
+            });
+        }
+
+        if self.thinking_picker.is_open() {
+            return Some(match self.thinking_picker.handle_key(key) {
+                ThinkingPickerAction::Consumed => vec![],
+                ThinkingPickerAction::Select(thinking) => {
+                    self.state.thinking = thinking;
+                    self.flash(format!("Thinking: {thinking}"));
+                    vec![]
+                }
+                ThinkingPickerAction::Close => vec![],
             });
         }
 
@@ -1330,10 +1346,18 @@ impl App {
             }
             "/thinking" => {
                 if !self.state.model.supports_thinking() {
-                    self.flash("Thinking requires a model that supports it".into());
+                    self.flash(THINKING_UNSUPPORTED_MSG.into());
                     return vec![];
                 }
-                match ThinkingConfig::parse(cmd.args.trim(), self.state.thinking) {
+                let args = cmd.args.trim();
+                // Bare `/thinking` used to blind-toggle, which never showed what
+                // the options were. Typed arguments still bypass the list.
+                if args.is_empty() {
+                    self.thinking_picker
+                        .open(&self.state.model, self.state.thinking);
+                    return vec![];
+                }
+                match ThinkingConfig::parse(args, self.state.thinking) {
                     Ok(thinking) => {
                         self.state.thinking = thinking;
                         self.flash(format!("Thinking: {thinking}"));
@@ -1505,7 +1529,7 @@ impl App {
         vec![]
     }
 
-    fn overlays(&self) -> [&dyn Overlay; 13] {
+    fn overlays(&self) -> [&dyn Overlay; 14] {
         [
             &self.help_modal,
             &self.usage_modal,
@@ -1516,6 +1540,7 @@ impl App {
             &self.task_picker,
             &self.rewind_picker,
             &self.theme_picker,
+            &self.thinking_picker,
             &self.model_picker,
             &self.login_picker,
             &self.mcp_picker,
@@ -1523,7 +1548,7 @@ impl App {
         ]
     }
 
-    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 13] {
+    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 14] {
         [
             &mut self.help_modal,
             &mut self.usage_modal,
@@ -1534,6 +1559,7 @@ impl App {
             &mut self.task_picker,
             &mut self.rewind_picker,
             &mut self.theme_picker,
+            &mut self.thinking_picker,
             &mut self.model_picker,
             &mut self.login_picker,
             &mut self.mcp_picker,
@@ -1638,6 +1664,7 @@ impl App {
         try_picker!(self.task_picker);
         try_picker!(self.rewind_picker);
         try_picker!(self.theme_picker);
+        try_picker!(self.thinking_picker);
         try_picker!(self.model_picker);
         try_picker!(self.mcp_picker);
         try_picker!(self.login_picker);

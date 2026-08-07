@@ -3370,16 +3370,32 @@ fn bash_prefix_overrides_mode() {
     assert_eq!(&*app.mode_label().0, "[BUILD]");
 }
 
+/// Bare `/thinking` used to blind-toggle off and adaptive, which never showed
+/// what the other options were. It opens the picker now, and opening alone must
+/// not change the setting.
 #[test]
-fn thinking_toggle_cycles_off_adaptive() {
+fn thinking_without_args_opens_picker_without_changing_setting() {
     let mut app = test_app();
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
 
     app.execute_command(cmd("/thinking"));
-    assert_eq!(app.state.thinking, ThinkingConfig::Adaptive);
 
-    app.execute_command(cmd("/thinking"));
+    assert!(app.thinking_picker.is_open());
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
+}
+
+#[test]
+fn thinking_picker_selection_applies_and_closes() {
+    let mut app = test_app();
+    app.execute_command(cmd("/thinking"));
+    assert!(app.thinking_picker.is_open());
+
+    // First row is off, second is adaptive.
+    app.update(Msg::Key(key(KeyCode::Down)));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert_eq!(app.state.thinking, ThinkingConfig::Adaptive);
+    assert!(!app.thinking_picker.is_open());
 }
 
 #[test]
