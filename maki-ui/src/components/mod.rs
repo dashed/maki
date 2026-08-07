@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use maki_agent::AgentInput;
 use maki_agent::{BufferSnapshot, ToolInput, ToolOutput};
-use maki_providers::{Message, ModelTier};
+use maki_providers::{Effort, Message, ModelTier};
 use ratatui::text::{Line, Span};
 
 pub(crate) const CHEVRON: &str = "❯ ";
@@ -198,6 +198,8 @@ pub enum Action {
     },
     AssignTier(String, ModelTier),
     UnassignTier(String, ModelTier),
+    SetEffort(String, Effort),
+    ClearEffort(String),
     RefreshModels,
     RefreshUsage,
     Compact,

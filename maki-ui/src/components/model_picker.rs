@@ -10,13 +10,58 @@ use maki_providers::ModelTier;
 use maki_providers::dynamic;
 use maki_providers::model_registry;
 use maki_providers::provider::ProviderKind;
+use maki_providers::{Effort, model::EffortOptions};
+use ratatui::widgets::Paragraph;
 
 use crate::components::Overlay;
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
+use crate::components::modal::Modal;
 use crate::theme;
 
 const TITLE: &str = " Models ";
 const RECENT_SECTION: &str = "Recent";
+const HELP_TITLE: &str = " Models help ";
+const HELP_WIDTH_PERCENT: u16 = 72;
+const HELP_MAX_HEIGHT_PERCENT: u16 = 80;
+const DETAIL_SEP: &str = " · ";
+const EFFORT_KEY: char = 'e';
+const HELP_KEY: char = '?';
+
+/// `(heading, key, description)`. Roles and effort answer different questions
+/// and the footer alone never said which was which, so spell it out here.
+const HELP_ROWS: &[(&str, &str, &str)] = &[
+    (
+        "Roles",
+        "! @ # $",
+        "Assign this model to a role: strong, medium, weak, compaction.",
+    ),
+    (
+        "",
+        "",
+        "Roles decide which model does what job. Subagents take the first",
+    ),
+    (
+        "",
+        "",
+        "model in each role. Press the same key again to unassign.",
+    ),
+    (
+        "Effort",
+        "e",
+        "Cycle how hard this model reasons, through the levels it actually",
+    ),
+    (
+        "",
+        "",
+        "supports. Wraps around to following /thinking again.",
+    ),
+    (
+        "",
+        "",
+        "OpenRouter publishes these per model; others use a provider default.",
+    ),
+    ("Pick", "Enter", "Use this model for the session."),
+];
 
 fn footer_line() -> Line<'static> {
     let t = theme::current();
@@ -31,7 +76,24 @@ fn footer_line() -> Line<'static> {
         Span::styled(" weak", t.tool_dim),
         Span::styled("  $", t.keybind_key),
         Span::styled(" compaction", t.tool_dim),
+        Span::styled("  e", t.keybind_key),
+        Span::styled(" effort", t.tool_dim),
+        Span::styled("  ?", t.keybind_key),
+        Span::styled(" help", t.tool_dim),
     ])
+}
+
+/// Walks the model's own levels and falls off the end back to `None`, which
+/// means "follow /thinking". A stale level the model no longer lists also lands
+/// on `None` rather than sticking.
+fn next_effort(current: Option<Effort>, supported: &[Effort]) -> Option<Effort> {
+    match current {
+        None => supported.first().copied(),
+        Some(level) => {
+            let idx = supported.iter().position(|&s| s == level)?;
+            supported.get(idx + 1).copied()
+        }
+    }
 }
 
 fn tier_for_shortcut(key: KeyEvent) -> Option<ModelTier> {
@@ -59,6 +121,8 @@ pub enum ModelPickerAction {
     Select(String),
     AssignTier(String, ModelTier),
     UnassignTier(String, ModelTier),
+    SetEffort(String, Effort),
+    ClearEffort(String),
     Close,
 }
 
@@ -67,8 +131,10 @@ struct ModelEntry {
     id: String,
     provider_display: String,
     suffix: Option<String>,
-    tier: String,
+    detail: String,
     override_tiers: Vec<ModelTier>,
+    effort: Option<Effort>,
+    supported_efforts: Vec<Effort>,
 }
 
 impl PickerItem for ModelEntry {
@@ -81,7 +147,7 @@ impl PickerItem for ModelEntry {
     }
 
     fn detail(&self) -> Option<&str> {
-        Some(&self.tier)
+        Some(&self.detail)
     }
 
     fn section(&self) -> Option<&str> {
@@ -100,6 +166,7 @@ pub struct ModelPicker {
     current_spec: String,
     last_spec_count: usize,
     dirty: bool,
+    show_help: bool,
 }
 
 impl ModelPicker {
@@ -111,6 +178,7 @@ impl ModelPicker {
             current_spec: String::new(),
             last_spec_count: 0,
             dirty: false,
+            show_help: false,
         }
     }
 
@@ -176,6 +244,7 @@ impl ModelPicker {
     }
 
     pub fn close(&mut self) {
+        self.show_help = false;
         self.picker.close();
     }
 
@@ -192,6 +261,28 @@ impl ModelPicker {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        // Help swallows the next key so `?` never both opens and acts.
+        if self.show_help {
+            self.show_help = false;
+            return ModelPickerAction::Consumed;
+        }
+        if key.code == KeyCode::Char(HELP_KEY) && !key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.show_help = true;
+            return ModelPickerAction::Consumed;
+        }
+        if key.code == KeyCode::Char(EFFORT_KEY)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(entry) = self.picker.selected_item()
+            && !entry.supported_efforts.is_empty()
+        {
+            let spec = entry.spec.clone();
+            let next = next_effort(entry.effort, &entry.supported_efforts);
+            self.dirty = true;
+            return match next {
+                Some(level) => ModelPickerAction::SetEffort(spec, level),
+                None => ModelPickerAction::ClearEffort(spec),
+            };
+        }
         if let Some(tier) = tier_for_shortcut(key)
             && let Some(entry) = self.picker.selected_item()
         {
@@ -212,7 +303,37 @@ impl ModelPicker {
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         self.try_refresh();
-        self.picker.view(frame, area)
+        let picker_area = self.picker.view(frame, area);
+        if self.show_help {
+            self.view_help(frame, area);
+        }
+        picker_area
+    }
+
+    fn view_help(&self, frame: &mut Frame, area: Rect) {
+        let t = theme::current();
+        let key_width = HELP_ROWS
+            .iter()
+            .map(|(_, key, _)| key.len())
+            .max()
+            .unwrap_or(0);
+        let lines: Vec<Line> = HELP_ROWS
+            .iter()
+            .map(|(heading, key, desc)| {
+                Line::from(vec![
+                    Span::styled(format!("  {heading:<8}"), t.keybind_section),
+                    Span::styled(format!("{key:<key_width$}  "), t.keybind_key),
+                    Span::styled(*desc, t.keybind_desc),
+                ])
+            })
+            .collect();
+        let (_, inner) = Modal {
+            title: HELP_TITLE,
+            width_percent: HELP_WIDTH_PERCENT,
+            max_height_percent: HELP_MAX_HEIGHT_PERCENT,
+        }
+        .render(frame, area, lines.len() as u16);
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 }
 
@@ -254,19 +375,29 @@ fn parse_model_entry(spec: &str) -> Option<ModelEntry> {
     .filter(|&t| map.has_override(spec, t))
     .collect();
     let override_label = map.override_tier_label(spec);
+    let effort = map.effort_for(spec);
     drop(map);
     let tier = override_label.unwrap_or_else(|| match maki_providers::Model::from_spec(spec) {
         Ok(m) => m.tier.to_string(),
         Err(_) => String::new(),
     });
+    let supported_efforts = model_registry::effort_options(provider_str, model_id)
+        .map(|o: EffortOptions| o.supported)
+        .unwrap_or_default();
+    let detail = match effort {
+        Some(level) => format!("{tier}{DETAIL_SEP}{level}"),
+        None => tier,
+    };
     let id = model_id.to_string();
     Some(ModelEntry {
         spec: spec.to_string(),
         id,
         provider_display,
         suffix: None,
-        tier,
+        detail,
         override_tiers,
+        effort,
+        supported_efforts,
     })
 }
 
@@ -338,7 +469,7 @@ mod tests {
         let entry = parse_model_entry("anthropic/claude-sonnet-4-20250514").unwrap();
         assert_eq!(entry.id, "claude-sonnet-4-20250514");
         assert_eq!(entry.provider_display, "Anthropic");
-        assert!(!entry.tier.is_empty());
+        assert!(!entry.detail.is_empty());
     }
 
     #[test]

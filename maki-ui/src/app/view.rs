@@ -307,7 +307,7 @@ impl App {
             auto_scroll: chat.auto_scroll(),
             chat_name,
             retry_info: self.retry_info.as_ref(),
-            thinking_label: self.state.thinking.status_label(),
+            thinking_label: self.state.thinking.status_label(&self.state.model),
             fast: self.state.fast,
             workflow: self.state.workflow,
             restoring: self.restoring.load(Ordering::Relaxed),

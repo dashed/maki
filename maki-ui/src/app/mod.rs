@@ -59,7 +59,7 @@ use maki_agent::{
 };
 use maki_config::UiConfig;
 use maki_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
-use maki_providers::{Model, ThinkingConfig, add_cost};
+use maki_providers::{Effort, Model, ThinkingConfig, add_cost, model_registry};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
 use maki_storage::model::persist_model;
@@ -86,6 +86,11 @@ const AUTH_EXPIRED_MSG: &str =
     "Token expired. Run `maki auth login` in another terminal, then press Enter to retry.";
 const FLASH_NO_PLAN: &str = "No plan file";
 const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
+const EFFORT_UNSUPPORTED_MSG: &str = "Effort requires a model that supports thinking";
+const EFFORT_BUDGET_ONLY_MSG: &str =
+    "This provider sets thinking by token budget, use /thinking <tokens>";
+const EFFORT_CLEARED_MSG: &str = "Effort cleared, following /thinking again";
+const EFFORT_CLEAR_ARGS: [&str; 3] = ["clear", "reset", "auto"];
 const FAST_ON_MSG: &str = "Fast mode: on";
 const FAST_OFF_MSG: &str = "Fast mode: off";
 const WORKFLOW_ON_MSG: &str = "Workflow mode: on";
@@ -673,6 +678,12 @@ impl App {
                 ModelPickerAction::UnassignTier(spec, tier) => {
                     vec![Action::UnassignTier(spec, tier)]
                 }
+                ModelPickerAction::SetEffort(spec, effort) => {
+                    vec![Action::SetEffort(spec, effort)]
+                }
+                ModelPickerAction::ClearEffort(spec) => {
+                    vec![Action::ClearEffort(spec)]
+                }
                 ModelPickerAction::Close => vec![],
             });
         }
@@ -1193,6 +1204,62 @@ impl App {
         idx
     }
 
+    /// Unlike `/thinking`, this refuses a level the model never offered rather
+    /// than quietly snapping it down, so asking for `max` on a model that stops
+    /// at `high` says so instead of pretending.
+    fn set_effort(&mut self, arg: &str) {
+        let model = &self.state.model;
+        if !model.supports_thinking() {
+            self.flash(EFFORT_UNSUPPORTED_MSG.into());
+            return;
+        }
+        let Some(options) = model_registry::effort_options(&model.provider, &model.id) else {
+            self.flash(EFFORT_BUDGET_ONLY_MSG.into());
+            return;
+        };
+        let spec = model.spec();
+
+        if EFFORT_CLEAR_ARGS.contains(&arg) {
+            model_registry::unset_effort_and_persist(&spec, &self.storage);
+            self.flash(EFFORT_CLEARED_MSG.into());
+            return;
+        }
+
+        let levels = options
+            .supported
+            .iter()
+            .map(|e| {
+                if options.default == Some(*e) {
+                    format!("{e} (default)")
+                } else {
+                    e.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        if arg.is_empty() {
+            let current = model_registry::model_registry()
+                .read()
+                .unwrap()
+                .effort_for(&spec);
+            let now = current.map_or_else(
+                || format!("{}", self.state.thinking),
+                |e| format!("{e} (set for this model)"),
+            );
+            self.flash(format!("Effort: {now}. Supports: {levels}"));
+            return;
+        }
+
+        match arg.parse::<Effort>() {
+            Ok(level) if options.supported.contains(&level) => {
+                model_registry::set_effort_and_persist(spec, level, &self.storage);
+                self.flash(format!("Effort for {}: {level}", model.id));
+            }
+            _ => self.flash(format!("{} supports: {levels}", model.id)),
+        }
+    }
+
     fn execute_command(&mut self, cmd: ParsedCommand) -> Vec<Action> {
         self.input_box.discard();
         match cmd.name.as_str() {
@@ -1273,6 +1340,10 @@ impl App {
                     }
                     Err(msg) => self.flash(msg.into()),
                 }
+                vec![]
+            }
+            "/effort" => {
+                self.set_effort(&cmd.args.trim().to_lowercase());
                 vec![]
             }
             "/fast" => {

@@ -602,8 +602,14 @@ impl ThinkingConfig {
             .map_err(|_| THINKING_USAGE)
     }
 
-    pub fn status_label(self) -> Option<Cow<'static, str>> {
-        match self {
+    /// Names the level actually going out, so the bar stops advertising an
+    /// effort the model was never asked for. Falls back to the raw setting for
+    /// providers that think in budgets and have no level to show.
+    pub fn status_label(self, model: &Model) -> Option<Cow<'static, str>> {
+        if let Some(effort) = resolved_effort(model, self) {
+            return Some(Cow::Owned(format!("thinking: {effort}")));
+        }
+        match effective_thinking(model, self) {
             Self::Off => None,
             Self::Adaptive => Some(Cow::Borrowed("thinking")),
             Self::Effort(e) => Some(Cow::Owned(format!("thinking: {e}"))),
@@ -653,19 +659,54 @@ pub struct RequestOptions {
 }
 
 impl RequestOptions {
-    /// Strips options the model does not support. Called once before every
-    /// request so UI state, restored sessions, and subagent flags all go
-    /// through the same gate.
+    /// Strips options the model does not support, and lets a per-model effort
+    /// win over the session-wide one. Called once before every request so UI
+    /// state, restored sessions, and subagent flags all go through the same
+    /// gate, which is why the override only has to be applied here.
     pub fn clamped(self, model: &crate::model::Model) -> Self {
         Self {
-            thinking: if model.supports_thinking() {
-                self.thinking
-            } else {
-                ThinkingConfig::Off
-            },
+            thinking: effective_thinking(model, self.thinking),
             fast: self.fast && model.supports_fast(),
         }
     }
+}
+
+fn per_model_effort(model: &Model) -> Option<Effort> {
+    crate::model_registry::model_registry()
+        .read()
+        .unwrap()
+        .effort_for(&model.spec())
+}
+
+/// What the session actually gets. A per-model pick beats the session setting,
+/// but a global off stays off: these picks persist across restarts, and one
+/// forgotten level silently spending tokens after someone typed `/thinking off`
+/// is the kind of surprise that costs money.
+fn effective_thinking(model: &Model, thinking: ThinkingConfig) -> ThinkingConfig {
+    if !model.supports_thinking() || matches!(thinking, ThinkingConfig::Off) {
+        return ThinkingConfig::Off;
+    }
+    per_model_effort(model).map_or(thinking, ThinkingConfig::Effort)
+}
+
+/// The level that will actually go out for this model, which is not always the
+/// one that was asked for: a per-model pick wins, `Adaptive` resolves to the
+/// model's own default, and anything above what the model accepts snaps down.
+/// The status bar shows this so it stops promising an effort we never send.
+pub fn resolved_effort(model: &Model, thinking: ThinkingConfig) -> Option<Effort> {
+    let options = crate::model_registry::effort_options(&model.provider, &model.id)?;
+    let level = match effective_thinking(model, thinking) {
+        ThinkingConfig::Off => return None,
+        ThinkingConfig::Adaptive => options.default?,
+        ThinkingConfig::Effort(e) => e,
+        ThinkingConfig::Budget(n) => Effort::from_budget(
+            n,
+            model
+                .max_thinking_budget()
+                .unwrap_or(FALLBACK_MAX_THINKING_BUDGET),
+        ),
+    };
+    Some(level.snap(&options.supported))
 }
 
 #[derive(Debug)]
@@ -998,6 +1039,57 @@ mod tests {
             fast: false,
         };
         assert_eq!(opts.clamped(&model).thinking, expected);
+    }
+
+    /// Unique id so this never races another test through the global registry.
+    const EFFORT_PROBE_MODEL: &str = "clamped-effort-probe";
+
+    fn with_stored_effort<T>(
+        model: &crate::model::Model,
+        effort: Effort,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let spec = model.spec();
+        crate::model_registry::model_registry()
+            .write()
+            .unwrap()
+            .set_effort(spec.clone(), effort);
+        let out = f();
+        crate::model_registry::model_registry()
+            .write()
+            .unwrap()
+            .unset_effort(&spec);
+        out
+    }
+
+    #[test_case(ThinkingConfig::Adaptive,             ThinkingConfig::Effort(Low) ; "beats_adaptive")]
+    #[test_case(ThinkingConfig::Effort(High),         ThinkingConfig::Effort(Low) ; "beats_explicit_effort")]
+    #[test_case(ThinkingConfig::Budget(8192),         ThinkingConfig::Effort(Low) ; "beats_budget")]
+    // A stored level must never resurrect thinking after an explicit off: these
+    // persist across restarts and would quietly spend tokens forever.
+    #[test_case(ThinkingConfig::Off,                  ThinkingConfig::Off         ; "never_overrides_off")]
+    fn clamped_prefers_per_model_effort(session: ThinkingConfig, expected: ThinkingConfig) {
+        let mut model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        model.id = EFFORT_PROBE_MODEL.into();
+        let opts = RequestOptions {
+            thinking: session,
+            fast: false,
+        };
+        let got = with_stored_effort(&model, Low, || opts.clamped(&model).thinking);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn clamped_still_forces_off_when_model_cannot_think() {
+        let mut model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        model.id = EFFORT_PROBE_MODEL.into();
+        model.supports_thinking_override = Some(false);
+        let opts = RequestOptions {
+            thinking: ThinkingConfig::Adaptive,
+            fast: false,
+        };
+        let got = with_stored_effort(&model, Low, || opts.clamped(&model).thinking);
+        assert_eq!(got, ThinkingConfig::Off);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::ops::AddAssign;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use maki_storage::sessions::{MIN_THINKING_BUDGET, StoredTokenUsage};
+use maki_storage::sessions::{Effort, MIN_THINKING_BUDGET, StoredTokenUsage};
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::{ManifestRegistry, ProviderManifest};
@@ -58,6 +58,17 @@ pub struct ModelInfo {
     pub tier: Option<ModelTier>,
     /// Store of additional metadata from the provider.
     pub provider_info: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+/// Which effort levels a model accepts and where it sits when nobody asks.
+/// OpenRouter publishes this per model; everyone else answers from their static
+/// dialect. Absent entirely for providers that steer thinking with token
+/// budgets (Google, llama.cpp, Ollama), where an effort level means nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffortOptions {
+    /// Ascending, never empty.
+    pub supported: Vec<Effort>,
+    pub default: Option<Effort>,
 }
 
 impl ModelInfo {

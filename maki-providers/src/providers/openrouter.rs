@@ -4,7 +4,7 @@ use flume::Sender;
 use maki_storage::id::SessionRef;
 use serde_json::{Value, json};
 
-use crate::model::{Model, ModelEntry, ModelInfo, ModelPricing};
+use crate::model::{EffortOptions, Model, ModelEntry, ModelInfo, ModelPricing};
 use crate::provider::{BoxFuture, Provider};
 use crate::{
     AgentError, Effort, EffortDialect, Message, ProviderEvent, RequestOptions, StreamResponse,
@@ -36,6 +36,7 @@ struct OpenRouterModelInfo {
     reasoning_mandatory: bool,
     reasoning_default_enabled: bool,
     reasoning_efforts: Vec<Effort>,
+    reasoning_default_effort: Option<Effort>,
 }
 
 pub struct OpenRouter {
@@ -71,6 +72,20 @@ impl OpenRouter {
     }
 }
 
+/// Reads back what `/models` said this model can do. Lives here so the
+/// `Arc<dyn Any>` downcast stays next to the type it produces, instead of
+/// leaking an OpenRouter-private shape into the registry or the UI.
+pub(crate) fn declared_effort_options(info: &ModelInfo) -> Option<EffortOptions> {
+    let reasoning = info
+        .provider_info
+        .as_ref()?
+        .downcast_ref::<OpenRouterModelInfo>()?;
+    (!reasoning.reasoning_efforts.is_empty()).then(|| EffortOptions {
+        supported: reasoning.reasoning_efforts.clone(),
+        default: reasoning.reasoning_default_effort,
+    })
+}
+
 /// OpenRouter models come in three reasoning states, encoded here as a
 /// dialect so `effort_str` can resolve them like any other provider:
 /// 1. mandatory - always on; Off sends nothing (can't disable).
@@ -85,8 +100,12 @@ fn effort_dialect(info: Option<&OpenRouterModelInfo>) -> EffortDialect<'_> {
             [] => dialect::PREFER_HIGH.supported,
             declared => declared,
         },
+        // The model tells us where it sits when left alone; only fall back to a
+        // blanket high when it stays quiet.
+        adaptive: info
+            .reasoning_default_effort
+            .or(dialect::PREFER_HIGH.adaptive),
         off: (info.reasoning_default_enabled && !info.reasoning_mandatory).then_some(dialect::OFF),
-        ..dialect::PREFER_HIGH
     }
 }
 
@@ -147,6 +166,10 @@ fn parse_model(m: &Value) -> Option<ModelInfo> {
                     efforts
                 })
                 .unwrap_or_default(),
+            reasoning_default_effort: v
+                .get("default_effort")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse().ok()),
         });
 
     let supports_thinking = reasoning.is_some()
@@ -302,6 +325,34 @@ mod tests {
         assert_eq!(reasoning.reasoning_efforts, vec![Effort::Low, Effort::High]);
     }
 
+    #[test_case(json!("xhigh"), Some(Effort::XHigh) ; "declared")]
+    #[test_case(json!("bogus"), None                ; "unknown_level_ignored")]
+    #[test_case(Value::Null,    None                ; "absent")]
+    fn parse_model_reads_default_effort(declared: Value, expected: Option<Effort>) {
+        let mut m = kimi_k3_json();
+        m["reasoning"] = json!({"mandatory": true, "default_effort": declared});
+
+        let info = parse_model(&m).expect("model should parse");
+        let provider_info = info.provider_info.expect("reasoning info should be set");
+        let reasoning = provider_info
+            .downcast_ref::<OpenRouterModelInfo>()
+            .expect("wrong provider info type");
+        assert_eq!(reasoning.reasoning_default_effort, expected);
+    }
+
+    /// Adaptive used to send a blanket "high" everywhere, ignoring what the
+    /// model said it does when left alone.
+    #[test_case(Some(Effort::Minimal), "minimal" ; "honors_declared_default")]
+    #[test_case(None,                  "high"    ; "falls_back_without_declared_default")]
+    fn adaptive_follows_model_default_effort(default_effort: Option<Effort>, expected: &str) {
+        let info = reasoning_info_with_default(&Effort::ALL, default_effort);
+        let (dialect, model) = openrouter_model(Some(&info));
+        assert_eq!(
+            ThinkingConfig::Adaptive.effort_str(&dialect, &model),
+            Some(expected)
+        );
+    }
+
     fn openrouter_model(info: Option<&OpenRouterModelInfo>) -> (EffortDialect<'_>, Model) {
         let model = Model {
             id: "test-model".into(),
@@ -319,10 +370,18 @@ mod tests {
     }
 
     fn reasoning_info(efforts: &[Effort]) -> OpenRouterModelInfo {
+        reasoning_info_with_default(efforts, None)
+    }
+
+    fn reasoning_info_with_default(
+        efforts: &[Effort],
+        default_effort: Option<Effort>,
+    ) -> OpenRouterModelInfo {
         OpenRouterModelInfo {
             reasoning_mandatory: false,
             reasoning_default_enabled: false,
             reasoning_efforts: efforts.to_vec(),
+            reasoning_default_effort: default_effort,
         }
     }
 
@@ -361,6 +420,7 @@ mod tests {
             reasoning_mandatory: mandatory,
             reasoning_default_enabled: default_enabled,
             reasoning_efforts: vec![],
+            reasoning_default_effort: None,
         };
         let (dialect, model) = openrouter_model(Some(&info));
         assert_eq!(ThinkingConfig::Off.effort_str(&dialect, &model), expected);

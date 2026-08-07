@@ -95,6 +95,11 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         max_args: 1,
     },
     BuiltinCommand {
+        name: "/effort",
+        description: "Set reasoning effort for the current model, from the levels it supports",
+        max_args: 1,
+    },
+    BuiltinCommand {
         name: "/fast",
         description: "Toggle Anthropic fast mode (Opus only)",
         max_args: 0,

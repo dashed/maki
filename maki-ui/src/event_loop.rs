@@ -1010,6 +1010,16 @@ impl<'t> EventLoop<'t> {
             Action::UnassignTier(spec, tier) => {
                 maki_providers::model_registry::unset_and_persist(&spec, tier, &self.ctx.storage);
             }
+            Action::SetEffort(spec, effort) => {
+                maki_providers::model_registry::set_effort_and_persist(
+                    spec,
+                    effort,
+                    &self.ctx.storage,
+                );
+            }
+            Action::ClearEffort(spec) => {
+                maki_providers::model_registry::unset_effort_and_persist(&spec, &self.ctx.storage);
+            }
             Action::Compact => {
                 let rt = &mut self.sessions[idx];
                 let run_id = rt.app.run_id;

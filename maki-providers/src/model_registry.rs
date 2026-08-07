@@ -15,12 +15,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
 
+use maki_storage::sessions::Effort;
 use maki_storage::{StateDir, atomic_write};
 use tracing::warn;
 
-use crate::model::{ModelInfo, ModelTier};
+use crate::model::{EffortOptions, ModelInfo, ModelTier};
+use crate::provider::ProviderKind;
 
 const TIERS_FILE: &str = "model-tiers";
+const EFFORTS_FILE: &str = "model-efforts";
 
 static REGISTRY: OnceLock<RwLock<ModelRegistry>> = OnceLock::new();
 
@@ -30,7 +33,47 @@ pub fn model_registry() -> &'static RwLock<ModelRegistry> {
 
 pub fn load_from_storage(dir: &StateDir) {
     let overrides = read_overrides(dir.path().join(TIERS_FILE).as_path());
-    model_registry().write().unwrap().set_overrides(overrides);
+    let efforts = read_efforts(dir.path().join(EFFORTS_FILE).as_path());
+    let mut reg = model_registry().write().unwrap();
+    reg.set_overrides(overrides);
+    reg.set_efforts(efforts);
+}
+
+pub fn set_effort_and_persist(spec: String, effort: Effort, dir: &StateDir) {
+    let snapshot = {
+        let mut reg = model_registry().write().unwrap();
+        reg.set_effort(spec, effort);
+        reg.efforts.clone()
+    };
+    write_efforts(dir.path().join(EFFORTS_FILE).as_path(), &snapshot);
+}
+
+pub fn unset_effort_and_persist(spec: &str, dir: &StateDir) {
+    let snapshot = {
+        let mut reg = model_registry().write().unwrap();
+        reg.unset_effort(spec);
+        reg.efforts.clone()
+    };
+    write_efforts(dir.path().join(EFFORTS_FILE).as_path(), &snapshot);
+}
+
+/// What this model accepts for effort. OpenRouter answers per model from
+/// `/models`; everyone else answers from their provider dialect. `None` means
+/// the provider thinks in token budgets, so there is no level to pick.
+pub fn effort_options(provider: &str, model_id: &str) -> Option<EffortOptions> {
+    if let Some(declared) = model_registry()
+        .read()
+        .unwrap()
+        .discovered(provider, model_id)
+        .and_then(crate::providers::openrouter::declared_effort_options)
+    {
+        return Some(declared);
+    }
+    let dialect = provider.parse::<ProviderKind>().ok()?.effort_dialect()?;
+    Some(EffortOptions {
+        supported: dialect.supported.to_vec(),
+        default: dialect.adaptive,
+    })
 }
 
 pub fn set_and_persist(spec: String, tier: ModelTier, dir: &StateDir) {
@@ -56,6 +99,10 @@ pub struct ModelRegistry {
     /// Keyed by tier (not spec) so inserting a model automatically evicts the
     /// previous holder. Persisted to disk.
     overrides: BTreeMap<ModelTier, String>,
+    /// Keyed by spec, because every model may hold its own effort. That is the
+    /// opposite of `overrides` above, where the tier is the key so a new holder
+    /// evicts the old one. Persisted to disk.
+    efforts: BTreeMap<String, Effort>,
     /// Ordered model info per provider, populated from `list_models()`.
     /// Not persisted - rebuilt every session. Used for auto-tier assignment
     /// and discovered metadata lookup.
@@ -65,6 +112,23 @@ pub struct ModelRegistry {
 impl ModelRegistry {
     pub fn set_overrides(&mut self, overrides: BTreeMap<ModelTier, String>) {
         self.overrides = overrides;
+    }
+
+    pub fn set_efforts(&mut self, efforts: BTreeMap<String, Effort>) {
+        self.efforts = efforts;
+    }
+
+    pub fn set_effort(&mut self, spec: String, effort: Effort) {
+        self.efforts.insert(spec, effort);
+    }
+
+    pub fn unset_effort(&mut self, spec: &str) {
+        self.efforts.remove(spec);
+    }
+
+    /// The user's pick for this model, if they made one.
+    pub fn effort_for(&self, spec: &str) -> Option<Effort> {
+        self.efforts.get(spec).copied()
     }
 
     pub fn set_known_models(&mut self, provider: &Arc<str>, models: Vec<ModelInfo>) {
@@ -253,6 +317,32 @@ fn read_overrides(path: &Path) -> BTreeMap<ModelTier, String> {
     }
 }
 
+fn read_efforts(path: &Path) -> BTreeMap<String, Effort> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
+    if raw.trim().is_empty() {
+        return BTreeMap::new();
+    }
+    serde_json::from_str(&raw).unwrap_or_else(|e| {
+        warn!(path = %path.display(), error = %e, "failed to parse effort overrides, ignoring");
+        BTreeMap::new()
+    })
+}
+
+fn write_efforts(path: &Path, efforts: &BTreeMap<String, Effort>) {
+    let json = match serde_json::to_vec_pretty(efforts) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize effort overrides");
+            return;
+        }
+    };
+    if let Err(e) = atomic_write(path, &json) {
+        warn!(path = %path.display(), error = %e, "failed to persist effort overrides");
+    }
+}
+
 fn write_overrides(path: &Path, overrides: &BTreeMap<ModelTier, String>) {
     let json = match serde_json::to_vec_pretty(overrides) {
         Ok(v) => v,
@@ -371,6 +461,51 @@ mod tests {
             make_tiered(&models).spec_for_tier("copilot", ModelTier::Strong),
             make_tiered(&reversed).spec_for_tier("copilot", ModelTier::Strong)
         );
+    }
+
+    const CORRUPT_EFFORTS: &str = "{not json";
+
+    #[test]
+    fn efforts_round_trip_through_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(EFFORTS_FILE);
+        let mut efforts = BTreeMap::new();
+        efforts.insert("openrouter/moonshotai/kimi-k3".to_string(), Effort::XHigh);
+        efforts.insert("anthropic/claude-opus-5".to_string(), Effort::Low);
+
+        write_efforts(&path, &efforts);
+        assert_eq!(read_efforts(&path), efforts);
+    }
+
+    #[test_case("" ; "empty")]
+    #[test_case(CORRUPT_EFFORTS ; "corrupt")]
+    fn unreadable_efforts_yield_empty_instead_of_failing(contents: &str) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(EFFORTS_FILE);
+        std::fs::write(&path, contents).expect("write");
+        assert!(read_efforts(&path).is_empty());
+    }
+
+    #[test]
+    fn missing_efforts_file_yields_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(read_efforts(&dir.path().join(EFFORTS_FILE)).is_empty());
+    }
+
+    /// Providers that steer thinking with a token budget have no level to
+    /// offer, and saying "medium" there would be a lie.
+    #[test_case("google"    ; "google_uses_budgets")]
+    #[test_case("ollama"    ; "ollama_uses_budgets")]
+    #[test_case("llama-cpp" ; "llama_cpp_uses_budgets")]
+    fn effort_options_absent_for_budget_providers(provider: &str) {
+        assert!(effort_options(provider, "any-model").is_none());
+    }
+
+    #[test_case("mistral",   &[Effort::High]                                    ; "high_only")]
+    #[test_case("openai",    &[Effort::Minimal, Effort::Low, Effort::Medium, Effort::High] ; "standard")]
+    fn effort_options_fall_back_to_provider_dialect(provider: &str, expected: &[Effort]) {
+        let options = effort_options(provider, "undiscovered-model").expect("dialect");
+        assert_eq!(options.supported, expected);
     }
 
     #[test]
