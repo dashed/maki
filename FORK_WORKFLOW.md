@@ -36,7 +36,7 @@ We do not intend to upstream these changes. When upstream happens to fix the sam
 main (upstream)
 │
 ├── alberto/fork-customizations
-│   └── This doc
+│   └── Git hash in `maki --version`, this doc
 │
 ├── alberto/openrouter-auth
 │   └── Register OpenRouter as a built-in provider
@@ -50,7 +50,7 @@ main (upstream)
 | Branch | Purpose | Commits |
 |--------|---------|:-------:|
 | `main` | Tracks upstream maki | — |
-| `alberto/fork-customizations` | This doc | 1 |
+| `alberto/fork-customizations` | Git hash in `--version`, this doc | 2 |
 | `alberto/openrouter-auth` | OpenRouter built-in registration | 1 |
 | `alberto/my-fork` | Combined features | merge |
 
@@ -208,7 +208,12 @@ The binary lands in `~/.cargo/bin/maki`. Verify with:
 
 ```bash
 maki --version
+# maki 0.4.5 (4509b3d6)
 ```
+
+The hash in parentheses is the commit the build came from, which is the only way to tell two builds of the same version apart. It comes from `build.rs`, and falls back to `unknown` when git is unavailable.
+
+One wrinkle from jj colocation. `build.rs` watches `.git/HEAD` and `.git/refs/heads`, and jj only writes those when a bookmark moves or you `git checkout`. Working on an unbookmarked jj commit means the embedded hash still points at the last exported commit. It catches up as soon as the bookmark moves, and a released build is always correct because `cargo install` recompiles.
 
 Maki is a TUI, so do not launch it bare when you only want to check the build. Use `--version` or `--help`.
 
@@ -261,6 +266,8 @@ jj op log                           # operation history
 | File | Purpose |
 |------|---------|
 | `Cargo.toml` | Workspace manifest and version |
+| `build.rs` | Captures the short git hash at build time as `GIT_HASH` |
+| `src/cli.rs` | Version string, appends the hash |
 | `FORK_WORKFLOW.md` | This documentation (on the fork-customizations branch) |
 | `maki-providers/src/providers/` | One file per provider, each with its `inventory::submit!` |
 | `maki-config/src/providers.rs` | `BuiltInProvider` struct and `providers.toml` handling |
