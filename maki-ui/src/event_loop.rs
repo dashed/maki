@@ -532,6 +532,7 @@ impl<'t> EventLoop<'t> {
             rt.app.tick_error_expiry();
             rt.app.poll_image_paste();
             rt.app.btw_modal.poll();
+            rt.app.poll_suggestions();
             rt.app.status_bar.poll_branch_update();
             rt.app.mcp_picker.refresh();
         }
@@ -1069,6 +1070,23 @@ impl<'t> EventLoop<'t> {
                     Arc::clone(&slot.provider),
                     slot.model.clone(),
                 );
+            }
+            Action::Suggest => {
+                // Deliberately no fallback to the current model, unlike
+                // compaction: an unpinned suggest role means the feature is
+                // off, not that the expensive model should draft prompts.
+                if let Some(spec) = maki_providers::model_registry::model_registry()
+                    .read()
+                    .unwrap()
+                    .spec_for_tier_any(maki_providers::ModelTier::Suggest)
+                    && let Ok(mut model) = Model::from_spec(&spec)
+                    && let Ok(provider) =
+                        maki_providers::provider::from_model(&mut model, self.ctx.timeouts)
+                {
+                    self.sessions[idx]
+                        .app
+                        .start_suggestions(Arc::from(provider), model);
+                }
             }
             Action::Suspend => {
                 let _pause = self.input.pause();

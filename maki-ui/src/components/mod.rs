@@ -23,6 +23,7 @@ pub(crate) mod search_modal;
 pub(crate) mod split_layout;
 pub mod status_bar;
 pub(crate) mod streaming_content;
+pub(crate) mod suggest_panel;
 pub(crate) mod theme_picker;
 pub(crate) mod thinking_picker;
 pub(crate) mod tool_display;
@@ -201,6 +202,8 @@ pub enum Action {
     UnassignTier(String, ModelTier),
     SetEffort(String, Effort),
     ClearEffort(String),
+    /// Draft follow-up prompts for the turn that just ended.
+    Suggest,
     RefreshModels,
     RefreshUsage,
     Compact,

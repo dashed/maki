@@ -12,6 +12,7 @@ mod queue;
 mod session;
 pub(crate) mod session_state;
 pub(crate) mod shell;
+mod suggest;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod view;
@@ -172,6 +173,13 @@ pub struct App {
     pub(crate) state: session_state::SessionState,
     pub exit_request: ExitRequest,
     pub(crate) exit_on_done: bool,
+    /// Follow-up prompts offered above the input, empty when there are none.
+    pub(super) suggestions: Vec<String>,
+    pub(super) suggest_rx: Option<flume::Receiver<suggest::Suggestions>>,
+    /// `/compact` finishes by emitting a normal `Done`, which is otherwise
+    /// indistinguishable from a real turn ending. Counted so a compact does not
+    /// buy a round of suggestions nobody asked for.
+    pub(super) pending_compacts: u32,
     pub(crate) queue: MessageQueue,
     recoverable_queue: Vec<String>,
     pub answer_tx: Option<flume::Sender<String>>,
@@ -264,6 +272,9 @@ impl App {
             state,
             exit_request: ExitRequest::None,
             exit_on_done: false,
+            suggestions: Vec::new(),
+            suggest_rx: None,
+            pending_compacts: 0,
             queue: MessageQueue::default(),
             recoverable_queue: Vec::new(),
             answer_tx: None,
@@ -770,6 +781,19 @@ impl App {
             return vec![];
         }
 
+        if !self.suggestions.is_empty() {
+            if let Some(prompt) = accepted_suggestion(key, &self.suggestions) {
+                self.input_box.set_input(prompt);
+                self.clear_suggestions();
+                return vec![];
+            }
+            // Anything else means the user has moved on. Dismiss without
+            // consuming the key, so the keystroke still lands in the input.
+            if dismisses_suggestions(key) {
+                self.clear_suggestions();
+            }
+        }
+
         if let Some(actions) = self.handle_ctrl(key) {
             return actions;
         }
@@ -1173,6 +1197,11 @@ impl App {
                     self.subagent_answers.clear();
                     self.status = Status::Idle;
                     self.fire_session_autocmd("TurnEnd", serde_json::json!({}));
+                    let after_compact = self.pending_compacts > 0;
+                    self.pending_compacts = self.pending_compacts.saturating_sub(1);
+                    if self.wants_suggestions(after_compact) {
+                        return vec![Action::Suggest];
+                    }
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Success;
                     }
@@ -1200,6 +1229,22 @@ impl App {
             }
         }
         vec![]
+    }
+
+    /// Subagent, cancelled and failed turns never reach the caller, so this
+    /// only has to rule out the endings that look like a finished turn but are
+    /// not one worth spending on.
+    fn wants_suggestions(&self, after_compact: bool) -> bool {
+        // `/compact` ends with an ordinary Done on the live run.
+        !after_compact
+            // Another prompt is already waiting, so anything offered now is
+            // superseded before it can be read.
+            && self.queue.is_empty()
+            // Launched to run one turn and quit.
+            && !self.exit_on_done
+            // The plan form owns the bottom of the screen and already says what
+            // happens next.
+            && !self.plan_form_active()
     }
 
     fn resolve_or_create_chat(&mut self, subagent: &SubagentInfo) -> usize {
@@ -1328,6 +1373,9 @@ impl App {
                 vec![]
             }
             "/compact" => {
+                // Compaction signals completion with an ordinary Done, so the
+                // turn-end handler needs telling that one is expected.
+                self.pending_compacts += 1;
                 if self.status == Status::Streaming {
                     self.queue_compact();
                     return vec![];
@@ -1781,6 +1829,29 @@ impl App {
         actions.extend(self.start_from_queue(&msg));
         actions
     }
+}
+
+/// Ctrl-chorded so a bare digit still types a digit. A suggestion you have to
+/// dismiss before you can type `1` would be worse than no suggestion.
+fn accepted_suggestion(key: KeyEvent, prompts: &[String]) -> Option<String> {
+    if !is_ctrl(&key) {
+        return None;
+    }
+    let KeyCode::Char(c @ '1'..='9') = key.code else {
+        return None;
+    };
+    let index = c.to_digit(10)? as usize - 1;
+    prompts.get(index).cloned()
+}
+
+/// Typing, submitting or escaping all mean the suggestions have been passed
+/// over. Navigation and resizing do not, so scrolling back through the answer
+/// does not throw them away.
+fn dismisses_suggestions(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Char(_) | KeyCode::Enter | KeyCode::Esc | KeyCode::Backspace | KeyCode::Tab
+    )
 }
 
 fn is_streaming_stop_key(key: KeyEvent) -> bool {

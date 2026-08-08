@@ -3373,6 +3373,82 @@ fn bash_prefix_overrides_mode() {
 /// Bare `/thinking` used to blind-toggle off and adaptive, which never showed
 /// what the other options were. It opens the picker now, and opening alone must
 /// not change the setting.
+const SUGGEST_PROMPTS: [&str; 2] = ["run the tests", "open a PR"];
+
+fn suggest_prompts() -> Vec<String> {
+    SUGGEST_PROMPTS.iter().map(|s| s.to_string()).collect()
+}
+
+fn ctrl_key(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+#[test_case('1', Some(SUGGEST_PROMPTS[0]) ; "first")]
+#[test_case('2', Some(SUGGEST_PROMPTS[1]) ; "second")]
+#[test_case('3', None                     ; "past_the_end")]
+fn ctrl_digit_picks_a_suggestion_by_position(digit: char, expected: Option<&str>) {
+    assert_eq!(
+        super::accepted_suggestion(ctrl_key(digit), &suggest_prompts()).as_deref(),
+        expected
+    );
+}
+
+/// The whole point is that you can type over the suggestions, so a bare digit
+/// has to reach the input box instead of picking one.
+#[test]
+fn a_bare_digit_is_not_a_suggestion_accept() {
+    assert_eq!(
+        super::accepted_suggestion(key(KeyCode::Char('1')), &suggest_prompts()),
+        None
+    );
+}
+
+#[test_case(KeyCode::Char('a') ; "typing")]
+#[test_case(KeyCode::Enter     ; "submitting")]
+#[test_case(KeyCode::Esc       ; "escaping")]
+#[test_case(KeyCode::Backspace ; "deleting")]
+fn moving_on_dismisses_suggestions(code: KeyCode) {
+    assert!(super::dismisses_suggestions(key(code)));
+}
+
+/// Reading back over the answer should not throw the suggestions away.
+#[test_case(KeyCode::Up       ; "scroll_up")]
+#[test_case(KeyCode::PageDown ; "page_down")]
+#[test_case(KeyCode::Left     ; "cursor_move")]
+fn navigating_keeps_suggestions(code: KeyCode) {
+    assert!(!super::dismisses_suggestions(key(code)));
+}
+
+/// Every one of these is a paid call, so each suppression gets its own case.
+#[test]
+fn suggestions_are_wanted_after_an_ordinary_turn() {
+    let app = test_app();
+    assert!(app.wants_suggestions(false));
+}
+
+#[test]
+fn a_compact_does_not_buy_suggestions() {
+    let app = test_app();
+    assert!(!app.wants_suggestions(true));
+}
+
+#[test]
+fn exiting_after_one_turn_does_not_buy_suggestions() {
+    let mut app = test_app();
+    app.exit_on_done = true;
+    assert!(!app.wants_suggestions(false));
+}
+
+/// `/compact` reaches turn end through the same Done arm as a real turn, so the
+/// counter is the only thing telling them apart.
+#[test]
+fn compact_command_arms_the_suppression() {
+    let mut app = test_app();
+    assert_eq!(app.pending_compacts, 0);
+    app.execute_command(cmd("/compact"));
+    assert_eq!(app.pending_compacts, 1);
+}
+
 #[test]
 fn thinking_without_args_opens_picker_without_changing_setting() {
     let mut app = test_app();
