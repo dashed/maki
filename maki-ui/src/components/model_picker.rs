@@ -74,7 +74,7 @@ const HELP_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "Effort",
-        "e",
+        "ctrl+e",
         "Cycle how hard this model reasons, through the levels it actually",
     ),
     (
@@ -105,7 +105,7 @@ fn footer_line() -> Line<'static> {
         Span::styled(" compaction", t.tool_dim),
         Span::styled("  %", t.keybind_key),
         Span::styled(" suggest", t.tool_dim),
-        Span::styled("  e", t.keybind_key),
+        Span::styled("  ctrl+e", t.keybind_key),
         Span::styled(" effort", t.tool_dim),
         Span::styled("  ?", t.keybind_key),
         Span::styled(" help", t.tool_dim),
@@ -309,8 +309,10 @@ impl ModelPicker {
             self.show_help = true;
             return ModelPickerAction::Consumed;
         }
+        // Ctrl-chorded: the picker's search box takes every bare printable
+        // character, so claiming a plain letter makes it untypeable.
         if key.code == KeyCode::Char(EFFORT_KEY)
-            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.modifiers.contains(KeyModifiers::CONTROL)
             && let Some(entry) = self.picker.selected_item()
             && !entry.spec.is_empty()
             && !entry.supported_efforts.is_empty()
@@ -610,6 +612,42 @@ mod tests {
             matches!(action, ModelPickerAction::Select(ref s) if s.contains("opus")),
             "search must reach opus, not a role row",
         );
+    }
+
+    /// A shortcut on a bare letter makes that letter untypeable in the search
+    /// box. `e` was bound to effort cycling and so no model with an e in its
+    /// name could be searched for, which is most of them.
+    #[test_case('e' ; "the_effort_key")]
+    #[test_case('s' ; "an_ordinary_letter")]
+    fn plain_letters_reach_the_search_box(letter: char) {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        let before = p.picker.visible_len();
+
+        p.handle_key(key(KeyCode::Char(letter)));
+
+        assert!(
+            p.picker.visible_len() < before,
+            "typing '{letter}' must filter the list, not be swallowed"
+        );
+    }
+
+    #[test]
+    fn ctrl_e_still_cycles_effort() {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        // Land on a real model row that has effort levels to cycle.
+        p.picker
+            .select_item_by(|e| !e.is_role && !e.supported_efforts.is_empty());
+
+        let action = p.handle_key(KeyEvent::new(
+            KeyCode::Char(EFFORT_KEY),
+            KeyModifiers::CONTROL,
+        ));
+        assert!(matches!(
+            action,
+            ModelPickerAction::SetEffort(..) | ModelPickerAction::ClearEffort(..)
+        ));
     }
 
     #[test]

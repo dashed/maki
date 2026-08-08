@@ -429,6 +429,13 @@ impl<T: PickerItem> ListPicker<T> {
         s.selected_item_index().map(|i| &s.items[i])
     }
 
+    /// How many rows survive the current search, which is how a test can tell
+    /// a keystroke reached the search box rather than being swallowed.
+    #[cfg(test)]
+    pub fn visible_len(&self) -> usize {
+        self.state.as_ref().map_or(0, |s| s.filtered.len())
+    }
+
     pub fn selected_index(&self) -> Option<usize> {
         self.state.as_ref().and_then(|s| s.selected_item_index())
     }
