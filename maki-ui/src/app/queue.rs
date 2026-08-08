@@ -232,6 +232,11 @@ impl App {
         // than hidden, so ctrl+0 cannot resurrect answers to an older question.
         self.clear_suggestions();
         self.status = Status::Streaming;
+        self.activity = Some(crate::components::activity::Activity {
+            started: std::time::Instant::now(),
+            output_tokens: 0,
+            seed: self.run_id,
+        });
         self.fire_session_autocmd("TurnStart", serde_json::json!({}));
         if !display.is_empty() {
             self.main_chat().show_user_message(display);

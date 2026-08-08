@@ -328,6 +328,7 @@ impl App {
             fast: self.state.fast,
             workflow: self.state.workflow,
             yolo: self.permissions.is_yolo(),
+            activity: self.activity,
             restoring: self.restoring.load(Ordering::Relaxed),
         };
         self.status_bar.view(frame, status_area, &ctx);

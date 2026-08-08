@@ -4626,3 +4626,69 @@ fn deliver(app: &mut App, completion: complete::Completion) {
     app.completion_rx = Some(rx);
     app.poll_completion();
 }
+
+// ---------------------------------------------------------------------------
+// Activity line
+// ---------------------------------------------------------------------------
+
+fn started_turn() -> App {
+    let mut app = test_app();
+    app.submit_or_queue(QueuedMessage {
+        text: "do the thing".into(),
+        images: Vec::new(),
+    });
+    app
+}
+
+#[test]
+fn a_turn_starts_the_activity_clock() {
+    let app = started_turn();
+    assert_eq!(app.status, Status::Streaming);
+    let activity = app.activity.expect("a running turn has an activity");
+    assert_eq!(activity.output_tokens, 0);
+}
+
+/// Providers report usage once per model reply, so this is where the count can
+/// honestly move.
+#[test]
+fn each_model_reply_adds_to_the_turn_count() {
+    let mut app = started_turn();
+    let usage = TokenUsage {
+        output: 40,
+        ..Default::default()
+    };
+    app.update(agent_msg(turn_complete(usage, "test", None)));
+    assert_eq!(app.activity.unwrap().output_tokens, 40);
+
+    app.update(agent_msg(turn_complete(usage, "test", None)));
+    assert_eq!(app.activity.unwrap().output_tokens, 80);
+}
+
+#[test]
+fn the_count_belongs_to_the_turn_not_the_session() {
+    let mut app = started_turn();
+    let usage = TokenUsage {
+        output: 40,
+        ..Default::default()
+    };
+    app.update(agent_msg(turn_complete(usage, "test", None)));
+    app.update(done_event());
+
+    app.submit_or_queue(QueuedMessage {
+        text: "again".into(),
+        images: Vec::new(),
+    });
+    assert_eq!(app.activity.unwrap().output_tokens, 0);
+}
+
+#[test_case(true  ; "finished")]
+#[test_case(false ; "cancelled")]
+fn the_clock_stops_when_the_turn_does(finished: bool) {
+    let mut app = started_turn();
+    if finished {
+        app.update(done_event());
+    } else {
+        app.handle_cancel();
+    }
+    assert!(app.activity.is_none());
+}

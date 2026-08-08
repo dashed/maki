@@ -29,6 +29,7 @@ use crate::AppSession;
 use crate::chat::Chat;
 use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
+use crate::components::activity::Activity;
 use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
@@ -190,6 +191,9 @@ pub struct App {
     /// In-flight inline completion of the half-typed draft, if any.
     pub(super) completion_rx: Option<flume::Receiver<complete::Completion>>,
     pub(super) completion_hinted: bool,
+    /// Live state of the turn in progress, for the status bar. `None` between
+    /// turns, which is what makes it the single source of "is it working".
+    pub(super) activity: Option<Activity>,
     /// `/compact` finishes by emitting a normal `Done`, which is otherwise
     /// indistinguishable from a real turn ending. Counted so a compact does not
     /// buy a round of suggestions nobody asked for.
@@ -294,6 +298,7 @@ impl App {
             rewrite_seq: 0,
             completion_rx: None,
             completion_hinted: false,
+            activity: None,
             pending_compacts: 0,
             queue: MessageQueue::default(),
             recoverable_queue: Vec::new(),
@@ -1036,6 +1041,7 @@ impl App {
         self.queue.clear();
         self.recoverable_queue.clear();
         self.status = Status::Idle;
+        self.activity = None;
         vec![Action::CancelAgent {
             run_id: cancelled_run,
         }]
@@ -1186,6 +1192,11 @@ impl App {
 
         if let AgentEvent::TurnComplete(ref tc) = envelope.event {
             self.state.token_usage += tc.usage;
+            if let Some(ref mut activity) = self.activity {
+                // Per model reply, which is the only granularity providers
+                // report, so this steps rather than ticks.
+                activity.output_tokens = activity.output_tokens.saturating_add(tc.usage.output);
+            }
             add_cost(&mut self.chats[chat_idx].cost, tc.cost);
             self.state
                 .session_mut()
@@ -1245,6 +1256,7 @@ impl App {
                     self.chat_index.clear();
                     self.subagent_answers.clear();
                     self.status = Status::Idle;
+                    self.activity = None;
                     self.fire_session_autocmd("TurnEnd", serde_json::json!({}));
                     let after_compact = self.pending_compacts > 0;
                     self.pending_compacts = self.pending_compacts.saturating_sub(1);
@@ -1257,6 +1269,7 @@ impl App {
                 }
                 ChatEventResult::Error(message) => {
                     self.status = Status::error(message.clone());
+                    self.activity = None;
                     self.status_bar.clear_flash();
                     self.subagent_answers.clear();
                     self.terminalize_turn(&message);

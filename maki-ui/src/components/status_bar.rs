@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use super::{RetryInfo, Status};
 
 use crate::animation::spinner_frame;
+use crate::components::activity::Activity;
 use crate::theme;
 
 use maki_providers::{ModelPricing, TokenUsage, format_tokens};
@@ -44,6 +45,7 @@ pub struct StatusBarContext<'a> {
     pub workflow: bool,
     pub yolo: bool,
     pub restoring: bool,
+    pub activity: Option<Activity>,
 }
 
 pub struct StatusBar {
@@ -107,6 +109,12 @@ impl StatusBar {
         if *ctx.status == Status::Streaming {
             let ch = spinner_frame(self.started_at.elapsed().as_millis());
             left_spans.push(Span::styled(format!(" {ch}"), theme::current().spinner));
+            if let Some(activity) = ctx.activity {
+                left_spans.push(Span::styled(
+                    format!(" {}", activity.label(Instant::now())),
+                    theme::current().status_dim,
+                ));
+            }
         }
 
         if ctx.restoring {
