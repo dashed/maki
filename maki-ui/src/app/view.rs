@@ -326,6 +326,7 @@ impl App {
             thinking_label: self.state.thinking.status_label(&self.state.model),
             fast: self.state.fast,
             workflow: self.state.workflow,
+            yolo: self.permissions.is_yolo(),
             restoring: self.restoring.load(Ordering::Relaxed),
         };
         self.status_bar.view(frame, status_area, &ctx);

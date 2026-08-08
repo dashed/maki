@@ -2116,6 +2116,38 @@ fn apply_loaded_session_defers_queued_messages_until_respawn() {
     assert_eq!(app.state.session.meta.queued_messages, ["deferred"]);
 }
 
+/// Draws the whole app to an off-screen terminal and flattens it, so a test can
+/// assert on what is actually on screen rather than on the state behind it.
+fn render_contains(app: &mut App, needle: &str) -> bool {
+    let area = Rect::new(0, 0, 100, 24);
+    let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.view(frame)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let screen: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+    screen.contains(needle)
+}
+
+/// The flash only fires at the moment of the toggle, so starting with `--yolo`
+/// used to leave nothing on screen at all. The bar has to carry it.
+#[test]
+fn yolo_shows_in_the_status_bar_for_as_long_as_it_is_on() {
+    use crate::components::status_bar::YOLO_LABEL;
+
+    let mut app = test_app();
+    assert!(!render_contains(&mut app, YOLO_LABEL.trim()));
+
+    app.execute_command(cmd("/yolo"));
+    assert!(
+        render_contains(&mut app, YOLO_LABEL.trim()),
+        "yolo must be visible while it is on"
+    );
+
+    app.execute_command(cmd("/yolo"));
+    assert!(!render_contains(&mut app, YOLO_LABEL.trim()));
+}
+
 #[test]
 fn yolo_toggle() {
     let mut app = test_app();

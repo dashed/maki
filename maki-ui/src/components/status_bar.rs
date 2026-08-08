@@ -15,6 +15,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+/// Shouted, unlike the lowercase advisory flags, and read by the test below so
+/// the two never drift.
+pub(crate) const YOLO_LABEL: &str = " [YOLO]";
 const FAST_LABEL: &str = " [fast]";
 const WORKFLOW_LABEL: &str = " [workflow]";
 
@@ -39,6 +42,7 @@ pub struct StatusBarContext<'a> {
     pub thinking_label: Option<Cow<'static, str>>,
     pub fast: bool,
     pub workflow: bool,
+    pub yolo: bool,
     pub restoring: bool,
 }
 
@@ -114,6 +118,12 @@ impl StatusBar {
         }
 
         left_spans.push(Span::styled(format!(" {}", ctx.mode_label), ctx.mode_style));
+
+        // Beside the mode rather than with the dim flags on the right: this is
+        // the one setting where not noticing it costs something.
+        if ctx.yolo {
+            left_spans.push(Span::styled(YOLO_LABEL, theme::current().error));
+        }
 
         if let Some(name) = ctx.chat_name {
             left_spans.push(Span::styled(
