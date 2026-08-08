@@ -41,6 +41,12 @@ main (upstream)
 ├── alberto/openrouter-auth
 │   └── Register OpenRouter as a built-in provider
 │
+├── alberto/effort-levels
+│   └── Per-model reasoning effort, provider routing, speed stats
+│
+├── alberto/modal-hints
+│   └── Say how to close pickers and modals
+│
 └── alberto/my-fork (integration merge)
     └── Combines all features + customizations
 ```
@@ -50,8 +56,10 @@ main (upstream)
 | Branch | Purpose | Commits |
 |--------|---------|:-------:|
 | `main` | Tracks upstream maki | — |
-| `alberto/fork-customizations` | Git hash in `--version`, this doc | 2 |
+| `alberto/fork-customizations` | Git hash in `--version`, this doc | 3 |
 | `alberto/openrouter-auth` | OpenRouter built-in registration | 1 |
+| `alberto/effort-levels` | Effort levels, `/provider` routing, per-provider speed | 6 |
+| `alberto/modal-hints` | Close hints on pickers and modals | 1 |
 | `alberto/my-fork` | Combined features | merge |
 
 ### Retired Branches
@@ -112,7 +120,9 @@ Rebase in order of conflict risk, lowest first:
 
 ```bash
 jj rebase -s "roots(${old_main}..alberto/fork-customizations)" -d main
+jj rebase -s "roots(${old_main}..alberto/modal-hints)" -d main
 jj rebase -s "roots(${old_main}..alberto/openrouter-auth)" -d main
+jj rebase -s "roots(${old_main}..alberto/effort-levels)" -d main
 ```
 
 ### Step 4: Resolve any conflicts
@@ -135,8 +145,9 @@ Resolving the earliest conflicted commit often cascades and fixes its descendant
 
 ```bash
 jj new alberto/openrouter-auth alberto/fork-customizations \
+       alberto/effort-levels alberto/modal-hints \
   -m "integration: combine fork branches"
-jj bookmark set alberto/my-fork --allow-backwards
+jj bookmark set alberto/my-fork --allow-backwards -r @
 ```
 
 ### Step 6: Verify and push
@@ -157,6 +168,31 @@ git checkout alberto/my-fork
 
 ## Adding a New Feature
 
+> **Start with `jj new`, always.** Rebuilding the integration merge leaves the
+> working copy sitting on that merge, so editing files right then hands the new
+> commit every one of the merge's parents. The branch you bookmark it onto
+> quietly swallows the other branches, and independent branches are the entire
+> point of this layout. It has already happened twice here.
+>
+> The tell is a feature branch whose `main..branch` log lists commits belonging
+> to other branches. Check with:
+>
+> ```bash
+> jj log -r 'main..alberto/some-feature' --no-graph \
+>   -T 'commit_id.short() ++ "  " ++ description.first_line() ++ "\n"'
+> ```
+>
+> To repair, find the commit with more than one parent and give it a single one:
+>
+> ```bash
+> jj log -r <suspect> --no-graph \
+>   -T 'commit_id.short() ++ " <- " ++ parents.map(|p| p.commit_id().short()).join(", ") ++ "\n"'
+> jj rebase -s <the-merge-y-commit> -d <the-real-branch-tip>
+> ```
+>
+> `-s` brings its descendants along, so one rebase straightens the whole chain.
+> Then reset the bookmark, rebuild the merge, and force push.
+
 ```bash
 jj new main -m "feat: description of feature"
 jj bookmark create alberto/new-feature
@@ -166,10 +202,25 @@ jj bookmark create alberto/new-feature
 Then fold it into the integration branch:
 
 ```bash
-jj new alberto/openrouter-auth alberto/fork-customizations alberto/new-feature \
+jj new alberto/openrouter-auth alberto/fork-customizations \
+       alberto/effort-levels alberto/modal-hints alberto/new-feature \
   -m "integration: combine fork branches"
-jj bookmark set alberto/my-fork --allow-backwards
+jj bookmark set alberto/my-fork --allow-backwards -r @
 ```
+
+### Sibling or stacked?
+
+Siblings off `main` only stay quiet when they touch different files. Two
+features that each register a slash command both append to `BUILTIN_COMMANDS`
+and to the const block in `maki-ui/src/app/mod.rs`, and that pair conflicts on
+every rebase and every time the merge is rebuilt. Provider routing started as a
+sibling for exactly that reason and produced five conflicts before landing on
+`alberto/effort-levels` instead, where it belonged anyway.
+
+Stack when two features share a surface or one uses the other's code. Keep them
+siblings when they can genuinely be dropped one at a time, which is what the
+Retired Branches table is for. Reusing a const from another branch is the
+clearest sign you have picked wrong.
 
 ## The Integration Branch (my-fork)
 
@@ -279,9 +330,9 @@ jj op log                           # operation history
 
 | Date | Upstream Range | New Commits | Conflicts | Notes |
 |------|---------------|:-----------:|-----------|-------|
-| 2026-08-07 | — → 91852e22 | — | — | Fork created, openrouter-auth branch added |
+| 2026-08-07 | — → 91852e22 | — | — | Fork created; openrouter-auth, effort-levels and modal-hints branches added |
 
 ---
 
 *Last updated: 2026-08-07*
-*Fork created at upstream 91852e22; OpenRouter registered as a built-in provider*
+*Fork created at upstream 91852e22; OpenRouter registered as a built-in provider, per-model effort levels and provider routing added*
