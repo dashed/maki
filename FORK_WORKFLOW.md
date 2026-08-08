@@ -68,6 +68,14 @@ main (upstream)
 |--------|--------|------|
 | — | — | — |
 
+## Design Notes
+
+Longer pieces of thinking that are not tied to one branch live in `docs/`:
+
+| Document | What it covers |
+|----------|----------------|
+| [docs/AGENT_TEAMS.md](docs/AGENT_TEAMS.md) | What it would take to give maki agent teams. Not implemented — a record of what the code actually supports, written so the next attempt starts from facts rather than guesses. |
+
 ## What Each Feature Branch Does
 
 ### alberto/openrouter-auth
