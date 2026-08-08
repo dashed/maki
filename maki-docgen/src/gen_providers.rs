@@ -11,7 +11,9 @@ weight = 7
 group = "Reference"
 +++"#;
 
-const TIER_PICKER_NOTE: &str = r#"Open the model picker with `/model` and press `!`, `@`, `#`, or `$` on any row to assign it to strong, medium, weak, or compaction. Press the same key again to remove the assignment. Your overrides are saved to `~/.local/state/maki/model-tiers` and apply across sessions."#;
+const TIER_PICKER_NOTE: &str = r#"Open the model picker with `/model` and press `!`, `@`, `#`, `$`, or `%` on any row to assign it to strong, medium, weak, compaction, or suggest. Press the same key again to remove the assignment. The rows at the top of the picker show which model currently holds each role. Your overrides are saved to `~/.local/state/maki/model-tiers` and apply across sessions.
+
+Strong, medium and weak are the roles the agent itself runs on. Compaction and suggest are side jobs, so a model can hold one of those and a real role at once without confusing which model the agent picks. Neither side job is ever assigned for you: nothing summarizes history or drafts follow-up prompts until you choose a model for it, which is the moment to pick something cheap."#;
 
 const AUTH_RELOADING: &str = r#"## Auth Reloading
 
