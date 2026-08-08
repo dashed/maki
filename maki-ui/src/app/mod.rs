@@ -9,6 +9,7 @@ mod image_paste;
 pub(crate) mod mode;
 mod mouse;
 mod queue;
+mod rewrite;
 mod session;
 pub(crate) mod session_state;
 pub(crate) mod shell;
@@ -40,6 +41,7 @@ use crate::components::mcp_picker::{McpPicker, McpPickerAction};
 use crate::components::model_picker::{ModelPicker, ModelPickerAction};
 use crate::components::permission_prompt::PermissionPrompt;
 use crate::components::plan_form::{PlanForm, PlanFormAction};
+use crate::components::prompt_editor::{PromptEditor, PromptEditorAction};
 use crate::components::rewind_picker::{RewindPicker, RewindPickerAction};
 use crate::components::scrollbar;
 use crate::components::search_modal::{SearchAction, SearchModal};
@@ -179,6 +181,11 @@ pub struct App {
     pub(super) suggestions: Vec<String>,
     pub(super) suggestions_hidden: bool,
     pub(super) suggest_rx: Option<flume::Receiver<suggest::Suggestions>>,
+    pub(crate) prompt_editor: PromptEditor,
+    pub(super) rewrite_rx: Option<flume::Receiver<rewrite::Rewrite>>,
+    /// Identifies the current editing session, so a redraft owed to a closed
+    /// one is dropped rather than landing on an unrelated draft.
+    pub(super) rewrite_seq: u64,
     /// `/compact` finishes by emitting a normal `Done`, which is otherwise
     /// indistinguishable from a real turn ending. Counted so a compact does not
     /// buy a round of suggestions nobody asked for.
@@ -278,6 +285,9 @@ impl App {
             suggestions: Vec::new(),
             suggestions_hidden: false,
             suggest_rx: None,
+            prompt_editor: PromptEditor::new(),
+            rewrite_rx: None,
+            rewrite_seq: 0,
             pending_compacts: 0,
             queue: MessageQueue::default(),
             recoverable_queue: Vec::new(),
@@ -691,6 +701,19 @@ impl App {
             });
         }
 
+        if self.prompt_editor.is_open() {
+            return Some(match self.prompt_editor.handle_key(key) {
+                PromptEditorAction::Consumed | PromptEditorAction::Close => vec![],
+                PromptEditorAction::Rewrite { draft, instruction } => {
+                    vec![Action::RewritePrompt { draft, instruction }]
+                }
+                PromptEditorAction::Accept(text) => {
+                    self.input_box.set_input_at_end(text);
+                    vec![]
+                }
+            });
+        }
+
         if self.thinking_picker.is_open() {
             return Some(match self.thinking_picker.handle_key(key) {
                 ThinkingPickerAction::Consumed => vec![],
@@ -846,6 +869,13 @@ impl App {
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
         if key::EDIT_INPUT.matches(key) {
             return vec![Action::EditInputInEditor];
+        }
+        if key::IMPROVE_PROMPT.matches(key) {
+            // Takes the draft rather than clearing it: the modal owns a copy
+            // and the input box only changes if the result is accepted.
+            let draft = self.input_box.buffer.value();
+            self.open_prompt_editor(&draft);
+            return vec![];
         }
         if is_ctrl(&key) {
             if key::POP_QUEUE.matches(key) {
@@ -1473,6 +1503,13 @@ impl App {
                 self.set_effort(&cmd.args.trim().to_lowercase());
                 vec![]
             }
+            "/improve" => {
+                // Typing the command consumed whatever was in the box, so the
+                // rest of the line is the draft. Empty is fine: the editor can
+                // build one from instructions alone.
+                self.open_prompt_editor(cmd.args.trim());
+                vec![]
+            }
             "/provider" => {
                 self.set_routing(&cmd.args.trim().to_lowercase());
                 vec![]
@@ -1636,7 +1673,7 @@ impl App {
         vec![]
     }
 
-    fn overlays(&self) -> [&dyn Overlay; 14] {
+    fn overlays(&self) -> [&dyn Overlay; 15] {
         [
             &self.help_modal,
             &self.usage_modal,
@@ -1652,10 +1689,11 @@ impl App {
             &self.login_picker,
             &self.mcp_picker,
             &self.permission_prompt,
+            &self.prompt_editor,
         ]
     }
 
-    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 14] {
+    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 15] {
         [
             &mut self.help_modal,
             &mut self.usage_modal,
@@ -1671,6 +1709,7 @@ impl App {
             &mut self.login_picker,
             &mut self.mcp_picker,
             &mut self.permission_prompt,
+            &mut self.prompt_editor,
         ]
     }
 

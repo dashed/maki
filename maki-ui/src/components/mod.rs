@@ -16,6 +16,7 @@ pub(crate) mod model_picker;
 pub(crate) mod permission_prompt;
 pub(crate) mod plan_form;
 pub(crate) mod progress_bar;
+pub(crate) mod prompt_editor;
 pub mod queue_panel;
 pub(crate) mod rewind_picker;
 pub(crate) mod scrollbar;
@@ -204,6 +205,11 @@ pub enum Action {
     ClearEffort(String),
     /// Draft follow-up prompts for the turn that just ended.
     Suggest,
+    /// Redraft the prompt held in the editor, following the user's instruction.
+    RewritePrompt {
+        draft: String,
+        instruction: String,
+    },
     RefreshModels,
     RefreshUsage,
     Compact,

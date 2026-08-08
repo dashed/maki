@@ -44,6 +44,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Ctrl+Q` | Pop queue |
 | `Esc Esc` | Rewind |
 | `Alt+O` | Edit input in external editor |
+| `Alt+I` | Improve the draft: edit it, or say how to reword it |
 
 ### macOS-specific
 

@@ -4338,3 +4338,127 @@ fn turn_end_keeps_only_the_subagents_that_finished() {
         .collect();
     assert_eq!(ids, [FINISHED_TASK_ID]);
 }
+
+// ---------------------------------------------------------------------------
+// Prompt editor
+// ---------------------------------------------------------------------------
+
+fn open_editor_with(draft: &str) -> App {
+    let mut app = test_app();
+    app.input_box.buffer.insert_text(draft);
+    app.update(Msg::Key(kb::IMPROVE_PROMPT.to_key_event()));
+    app
+}
+
+#[test]
+fn alt_i_opens_the_prompt_editor_on_the_current_draft() {
+    let app = open_editor_with("add auth");
+    assert!(app.prompt_editor.is_open());
+    assert_eq!(app.prompt_editor.draft(), "add auth");
+}
+
+/// The draft is copied, not moved: abandoning the editor has to leave the user
+/// exactly where they were.
+#[test]
+fn opening_the_editor_leaves_the_input_box_alone() {
+    let mut app = open_editor_with("add auth");
+    assert_eq!(app.input_box.buffer.value(), "add auth");
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!app.prompt_editor.is_open());
+    assert_eq!(app.input_box.buffer.value(), "add auth");
+}
+
+#[test]
+fn the_editor_swallows_keys_meant_for_the_input_box() {
+    let mut app = open_editor_with("add auth");
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Char('x'))));
+    assert_eq!(app.input_box.buffer.value(), "add auth");
+}
+
+#[test]
+fn accepting_replaces_the_draft_in_the_input_box() {
+    let mut app = open_editor_with("add auth");
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Tab)));
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Char('!'))));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('s'),
+        KeyModifiers::CONTROL,
+    )));
+
+    assert!(!app.prompt_editor.is_open());
+    assert_eq!(app.input_box.buffer.value(), "add auth!");
+}
+
+#[test]
+fn an_instruction_asks_for_a_rewrite() {
+    let mut app = open_editor_with("add auth");
+    for c in "shorter".chars() {
+        app.update(Msg::Key(KeyEvent::from(KeyCode::Char(c))));
+    }
+    let actions = app.update(Msg::Key(KeyEvent::from(KeyCode::Enter)));
+    match &actions[..] {
+        [Action::RewritePrompt { draft, instruction }] => {
+            assert_eq!(draft, "add auth");
+            assert_eq!(instruction, "shorter");
+        }
+        _ => panic!("expected a rewrite"),
+    }
+}
+
+#[test]
+fn improve_command_takes_the_rest_of_the_line_as_the_draft() {
+    let mut app = test_app();
+    app.execute_command(ParsedCommand {
+        name: "/improve".into(),
+        args: "add auth to login".into(),
+    });
+    assert!(app.prompt_editor.is_open());
+    assert_eq!(app.prompt_editor.draft(), "add auth to login");
+}
+
+#[test]
+fn improve_command_with_no_args_opens_an_empty_editor() {
+    let mut app = test_app();
+    app.execute_command(ParsedCommand {
+        name: "/improve".into(),
+        args: String::new(),
+    });
+    assert!(app.prompt_editor.is_open());
+    assert_eq!(app.prompt_editor.draft(), "");
+}
+
+/// A redraft owed to a session the user has already left must not land on the
+/// draft they opened next.
+#[test]
+fn a_stale_rewrite_is_dropped() {
+    let mut app = open_editor_with("first");
+    let stale = app.rewrite_seq;
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Esc)));
+    app.open_prompt_editor("second");
+
+    let (tx, rx) = flume::bounded(1);
+    tx.send(rewrite::Rewrite {
+        seq: stale,
+        text: Ok("rewritten first".into()),
+    })
+    .unwrap();
+    app.rewrite_rx = Some(rx);
+    app.poll_rewrite();
+
+    assert_eq!(app.prompt_editor.draft(), "second");
+}
+
+#[test]
+fn a_current_rewrite_becomes_the_draft() {
+    let mut app = open_editor_with("first");
+    let (tx, rx) = flume::bounded(1);
+    tx.send(rewrite::Rewrite {
+        seq: app.rewrite_seq,
+        text: Ok("rewritten".into()),
+    })
+    .unwrap();
+    app.rewrite_rx = Some(rx);
+    app.poll_rewrite();
+
+    assert_eq!(app.prompt_editor.draft(), "rewritten");
+}

@@ -262,6 +262,14 @@ impl InputBox {
         self.buffer = TextBuffer::new(s);
     }
 
+    /// Cursor lands at the end, ready to keep typing. For text that arrived
+    /// finished from elsewhere, unlike history, which is recalled to be
+    /// re-read from the start.
+    pub fn set_input_at_end(&mut self, s: String) {
+        self.buffer = TextBuffer::new(s);
+        self.buffer.move_to_end();
+    }
+
     pub fn history_up(&mut self) {
         if self.history.is_empty() {
             return;

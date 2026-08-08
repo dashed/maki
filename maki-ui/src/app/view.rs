@@ -265,6 +265,7 @@ impl App {
         render_if_open!(self.model_picker);
         render_if_open!(self.login_picker);
         render_if_open!(self.mcp_picker);
+        render_if_open!(self.prompt_editor);
 
         overlay_rect
     }

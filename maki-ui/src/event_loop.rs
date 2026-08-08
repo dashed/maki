@@ -54,6 +54,8 @@ const DRAIN_BUDGET: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
 const NOT_LIVE_ERR: &str = "session not live";
+const NO_SUGGEST_MODEL: &str = "no model assigned to the suggest role (pick one in /model)";
+const REWRITE_UNAVAILABLE: &str = "suggest model unavailable";
 
 /// Tabs carry their in-memory sessions so `/reload` reopens them without a
 /// disk round-trip; `session_has_content` tells which ones were saved.
@@ -533,6 +535,7 @@ impl<'t> EventLoop<'t> {
             rt.app.poll_image_paste();
             rt.app.btw_modal.poll();
             rt.app.poll_suggestions();
+            rt.app.poll_rewrite();
             rt.app.status_bar.poll_branch_update();
             rt.app.mcp_picker.refresh();
         }
@@ -1086,6 +1089,37 @@ impl<'t> EventLoop<'t> {
                     self.sessions[idx]
                         .app
                         .start_suggestions(Arc::from(provider), model);
+                }
+            }
+            Action::RewritePrompt { draft, instruction } => {
+                // Same role and same reasoning as suggestions: no suggest model
+                // pinned means the feature is off, not that the expensive model
+                // should be spent rewording a prompt. Unlike suggestions this
+                // says so, because the user asked and is watching a spinner.
+                let spec = maki_providers::model_registry::model_registry()
+                    .read()
+                    .unwrap()
+                    .spec_for_tier_any(maki_providers::ModelTier::Suggest);
+                let app = &mut self.sessions[idx].app;
+                match spec {
+                    None => app.fail_rewrite(NO_SUGGEST_MODEL.to_string()),
+                    Some(spec) => match Model::from_spec(&spec) {
+                        Err(e) => app.fail_rewrite(format!("{REWRITE_UNAVAILABLE}: {e}")),
+                        Ok(mut model) => {
+                            match maki_providers::provider::from_model(
+                                &mut model,
+                                self.ctx.timeouts,
+                            ) {
+                                Err(e) => app.fail_rewrite(format!("{REWRITE_UNAVAILABLE}: {e}")),
+                                Ok(provider) => app.start_rewrite(
+                                    Arc::from(provider),
+                                    model,
+                                    draft,
+                                    instruction,
+                                ),
+                            }
+                        }
+                    },
                 }
             }
             Action::Suspend => {

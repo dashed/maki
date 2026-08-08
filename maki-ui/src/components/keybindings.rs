@@ -162,6 +162,13 @@ pub mod key {
         modifiers: KeyModifiers::ALT,
         label: "Alt+O",
     };
+    /// Sits beside `Alt+O`, the other way to work on a draft before sending
+    /// it. Alt rather than ctrl because every ctrl letter is spoken for.
+    pub const IMPROVE_PROMPT: Bind = Bind {
+        code: KeyCode::Char('i'),
+        modifiers: KeyModifiers::ALT,
+        label: "Alt+I",
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
@@ -484,6 +491,12 @@ pub const KEYBINDS: &[Keybind] = &[
     Keybind {
         label: KeyLabel::Single(key::EDIT_INPUT.label),
         description: "Edit input in external editor",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single(key::IMPROVE_PROMPT.label),
+        description: "Improve the draft: edit it, or say how to reword it",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },
