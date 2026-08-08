@@ -141,6 +141,13 @@ pub mod key {
     pub const DELETE_WORD: Bind = ctrl_bind!('w');
     pub const SEARCH: Bind = ctrl_bind!('f');
     pub const FILE_PICKER: Bind = ctrl_bind!('s');
+    /// Sits with `Ctrl+1..3`, which pick a suggestion: same family, and every
+    /// ctrl letter was already spoken for.
+    pub const SHOW_SUGGESTIONS: Bind = Bind {
+        code: KeyCode::Char('0'),
+        modifiers: KeyModifiers::CONTROL,
+        label: "Ctrl+0",
+    };
     pub const OPEN_EDITOR: Bind = ctrl_bind!('o');
     pub const PLAN_TOGGLE: Bind = ctrl_bind!('t');
     pub const TASKS: Bind = ctrl_bind!('x');
@@ -379,8 +386,20 @@ pub const KEYBINDS: &[Keybind] = &[
         platform: Platform::All,
     },
     Keybind {
+        label: KeyLabel::Single("Tab"),
+        description: "Use the top suggested follow-up prompt (when one is shown)",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
         label: KeyLabel::Single("Ctrl+1..3"),
         description: "Use a suggested follow-up prompt",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single(key::SHOW_SUGGESTIONS.label),
+        description: "Show or hide the suggested follow-up prompts",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },

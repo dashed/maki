@@ -3425,6 +3425,58 @@ fn ctrl_digit_picks_a_suggestion_by_position(digit: char, expected: Option<&str>
     );
 }
 
+#[test]
+fn tab_takes_the_top_suggestion() {
+    assert_eq!(
+        super::accepted_suggestion(key(KeyCode::Tab), &suggest_prompts()).as_deref(),
+        Some(SUGGEST_PROMPTS[0])
+    );
+}
+
+/// Tab only claims the suggestion while one is on screen; the rest of the time
+/// it still has to toggle mode.
+#[test]
+fn tab_toggles_mode_when_no_suggestions_are_up() {
+    let mut app = test_app();
+    assert!(app.suggestions.is_empty());
+    let before = app.mode_label().0.to_string();
+
+    app.update(Msg::Key(key(KeyCode::Tab)));
+
+    assert_ne!(app.mode_label().0.to_string(), before);
+}
+
+/// Re-showing must not cost another call, so dismissing hides rather than
+/// throws away.
+#[test]
+fn dismissing_keeps_the_prompts_for_ctrl_zero() {
+    let mut app = test_app();
+    app.suggestions = suggest_prompts();
+
+    app.update(Msg::Key(key(KeyCode::Char('x'))));
+    assert!(!app.showing_suggestions(), "typing should hide them");
+    assert!(!app.suggestions.is_empty(), "but not discard them");
+
+    app.update(Msg::Key(kb::SHOW_SUGGESTIONS.to_key_event()));
+    assert!(app.showing_suggestions(), "ctrl+0 should bring them back");
+}
+
+/// They answer the turn that produced them, so a new turn drops them for good.
+#[test]
+fn a_new_turn_discards_the_old_suggestions() {
+    let mut app = test_app();
+    app.suggestions = suggest_prompts();
+
+    // Type and submit, which is the only way a turn actually starts.
+    app.update(Msg::Key(key(KeyCode::Char('h'))));
+    app.update(Msg::Key(key(KeyCode::Char('i'))));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert!(app.suggestions.is_empty());
+    app.update(Msg::Key(kb::SHOW_SUGGESTIONS.to_key_event()));
+    assert!(!app.showing_suggestions(), "ctrl+0 must not resurrect them");
+}
+
 /// The whole point is that you can type over the suggestions, so a bare digit
 /// has to reach the input box instead of picking one.
 #[test]

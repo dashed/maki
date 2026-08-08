@@ -80,10 +80,32 @@ impl App {
             return;
         }
         self.suggestions = suggestions.prompts;
+        self.suggestions_hidden = false;
+    }
+
+    pub(crate) fn showing_suggestions(&self) -> bool {
+        !self.suggestions.is_empty() && !self.suggestions_hidden
+    }
+
+    /// What the panel should draw: empty while hidden, so layout gives the rows
+    /// back to the chat instead of leaving a gap.
+    pub(crate) fn shown_suggestions(&self) -> &[String] {
+        if self.suggestions_hidden {
+            &[]
+        } else {
+            &self.suggestions
+        }
+    }
+
+    /// Kept rather than dropped, so `ctrl+s` can put the same set back without
+    /// paying for a second draft of prompts we already have.
+    pub(crate) fn hide_suggestions(&mut self) {
+        self.suggestions_hidden = true;
     }
 
     pub(crate) fn clear_suggestions(&mut self) {
         self.suggestions.clear();
+        self.suggestions_hidden = false;
         self.suggest_rx = None;
     }
 }

@@ -173,8 +173,11 @@ pub struct App {
     pub(crate) state: session_state::SessionState,
     pub exit_request: ExitRequest,
     pub(crate) exit_on_done: bool,
-    /// Follow-up prompts offered above the input, empty when there are none.
+    /// Follow-up prompts for the last turn, empty when there are none. Kept
+    /// after dismissal so they can be shown again rather than regenerated,
+    /// which would cost another call for prompts we already have.
     pub(super) suggestions: Vec<String>,
+    pub(super) suggestions_hidden: bool,
     pub(super) suggest_rx: Option<flume::Receiver<suggest::Suggestions>>,
     /// `/compact` finishes by emitting a normal `Done`, which is otherwise
     /// indistinguishable from a real turn ending. Counted so a compact does not
@@ -273,6 +276,7 @@ impl App {
             exit_request: ExitRequest::None,
             exit_on_done: false,
             suggestions: Vec::new(),
+            suggestions_hidden: false,
             suggest_rx: None,
             pending_compacts: 0,
             queue: MessageQueue::default(),
@@ -781,16 +785,23 @@ impl App {
             return vec![];
         }
 
-        if !self.suggestions.is_empty() {
+        // Bringing them back is worth a key of its own: the prompts are already
+        // paid for, so re-showing beats generating a fresh set.
+        if key::SHOW_SUGGESTIONS.matches(key) && !self.suggestions.is_empty() {
+            self.suggestions_hidden = !self.suggestions_hidden;
+            return vec![];
+        }
+
+        if self.showing_suggestions() {
             if let Some(prompt) = accepted_suggestion(key, &self.suggestions) {
                 self.input_box.set_input(prompt);
-                self.clear_suggestions();
+                self.hide_suggestions();
                 return vec![];
             }
-            // Anything else means the user has moved on. Dismiss without
+            // Anything else means the user has moved on. Hidden without
             // consuming the key, so the keystroke still lands in the input.
             if dismisses_suggestions(key) {
-                self.clear_suggestions();
+                self.hide_suggestions();
             }
         }
 
@@ -1831,9 +1842,14 @@ impl App {
     }
 }
 
-/// Ctrl-chorded so a bare digit still types a digit. A suggestion you have to
-/// dismiss before you can type `1` would be worse than no suggestion.
+/// Tab takes the first, the way every editor has trained people to expect.
+/// Beyond that it is ctrl-chorded, so a bare digit still types a digit: a
+/// suggestion you have to dismiss before you can type `1` would be worse than
+/// no suggestion at all.
 fn accepted_suggestion(key: KeyEvent, prompts: &[String]) -> Option<String> {
+    if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+        return prompts.first().cloned();
+    }
     if !is_ctrl(&key) {
         return None;
     }
@@ -1850,7 +1866,7 @@ fn accepted_suggestion(key: KeyEvent, prompts: &[String]) -> Option<String> {
 fn dismisses_suggestions(key: KeyEvent) -> bool {
     matches!(
         key.code,
-        KeyCode::Char(_) | KeyCode::Enter | KeyCode::Esc | KeyCode::Backspace | KeyCode::Tab
+        KeyCode::Char(_) | KeyCode::Enter | KeyCode::Esc | KeyCode::Backspace
     )
 }
 

@@ -228,6 +228,9 @@ impl App {
         self.run_id += 1;
         // New work supersedes text held for recovery after an agent error.
         self.recoverable_queue.clear();
+        // Suggestions belong to the turn that produced them. Dropped rather
+        // than hidden, so ctrl+0 cannot resurrect answers to an older question.
+        self.clear_suggestions();
         self.status = Status::Streaming;
         self.fire_session_autocmd("TurnStart", serde_json::json!({}));
         if !display.is_empty() {

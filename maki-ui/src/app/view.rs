@@ -81,7 +81,7 @@ impl App {
         } else if self.is_main_chat() {
             let panel_h: u16 = self.float_mgr.panel_reqs().iter().map(|(_, h)| *h).sum();
             queue_panel::height(self.queue.panel_len())
-                + suggest_panel::height(self.suggestions.len())
+                + suggest_panel::height(self.shown_suggestions().len())
                 + panel_h
                 + self.input_box.height(inner.width).min(max_bottom)
         } else {
@@ -109,7 +109,7 @@ impl App {
         let suggest_height = if bottom_takeover {
             0
         } else {
-            suggest_panel::height(self.suggestions.len())
+            suggest_panel::height(self.shown_suggestions().len())
         };
 
         let mut constraints = vec![
@@ -203,7 +203,7 @@ impl App {
         } else if layout.bottom_area.height > 0 {
             let queue_entries = self.queue.panel_entries();
             queue_panel::view(frame, layout.queue_area, &queue_entries, self.queue.focus());
-            suggest_panel::view(frame, layout.suggest_area, &self.suggestions);
+            suggest_panel::view(frame, layout.suggest_area, self.shown_suggestions());
             for &(idx, rect) in &layout.panel_windows {
                 self.float_mgr.view_panel(frame, idx, rect);
             }
