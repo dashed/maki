@@ -4467,103 +4467,96 @@ fn a_current_rewrite_becomes_the_draft() {
 // Inline completion
 // ---------------------------------------------------------------------------
 
-/// Puts the app in the state `tick_completion` reaches after typing settles.
-fn typed_and_settled(text: &str) -> App {
+fn press_complete(app: &mut App) -> Vec<Action> {
+    app.update(Msg::Key(kb::COMPLETE.to_key_event()))
+}
+
+fn typed(text: &str) -> App {
     let mut app = test_app();
     app.input_box.buffer.insert_text(text);
-    app.tick_completion();
-    app.completion_since = Some(Instant::now() - Duration::from_secs(1));
     app
 }
 
-fn asks_to_complete(app: &mut App) -> bool {
-    matches!(&app.tick_completion()[..], [Action::Complete(_)])
-}
-
 #[test]
-fn a_settled_draft_is_completed() {
-    let mut app = typed_and_settled("add auth to");
-    match &app.tick_completion()[..] {
+fn the_key_asks_for_a_completion_of_the_draft() {
+    let mut app = typed("add auth to");
+    match &press_complete(&mut app)[..] {
         [Action::Complete(prefix)] => assert_eq!(prefix, "add auth to"),
         _ => panic!("expected a completion request"),
     }
 }
 
-/// The debounce is the whole cost control: without it every keystroke buys a
-/// call.
+/// Nothing goes out on its own: this is the whole point of the key.
 #[test]
-fn a_draft_still_being_typed_is_left_alone() {
-    let mut app = test_app();
-    app.input_box.buffer.insert_text("add auth to");
-    app.tick_completion();
-    assert!(!asks_to_complete(&mut app));
+fn nothing_is_asked_for_without_the_key() {
+    let mut app = typed("add auth to");
+    for c in " the login".chars() {
+        app.update(Msg::Key(KeyEvent::from(KeyCode::Char(c))));
+    }
+    assert!(app.completion_rx.is_none());
 }
 
 #[test]
-fn typing_again_restarts_the_debounce() {
-    let mut app = typed_and_settled("add auth to");
-    app.input_box.buffer.insert_text(" the");
-    assert!(!asks_to_complete(&mut app));
-}
-
-/// One call per distinct draft. A draft that yields nothing must not be asked
-/// about again on every tick that follows.
-#[test]
-fn the_same_draft_is_only_asked_about_once() {
-    let mut app = typed_and_settled("add auth to");
-    assert!(asks_to_complete(&mut app));
-    app.completion_rx = None;
-    assert!(!asks_to_complete(&mut app));
-}
-
-#[test]
-fn a_draft_is_asked_about_again_after_it_changes() {
-    let mut app = typed_and_settled("add auth to");
-    assert!(asks_to_complete(&mut app));
-    app.completion_rx = None;
-    app.input_box.buffer.insert_text(" login");
-    app.tick_completion();
-    app.completion_since = Some(Instant::now() - Duration::from_secs(1));
-    assert!(asks_to_complete(&mut app));
-}
-
-#[test]
-fn nothing_is_asked_while_a_request_is_in_flight() {
-    let mut app = typed_and_settled("add auth to");
+fn a_second_press_is_ignored_while_one_is_in_flight() {
+    let mut app = typed("add auth to");
     let (_tx, rx) = flume::bounded::<complete::Completion>(1);
     app.completion_rx = Some(rx);
-    assert!(!asks_to_complete(&mut app));
+    assert!(press_complete(&mut app).is_empty());
+}
+
+/// A key that appears to do nothing is worse than a slow one, so every refusal
+/// says why.
+#[test]
+fn an_empty_draft_is_refused_out_loud() {
+    let mut app = test_app();
+    assert!(press_complete(&mut app).is_empty());
+    assert_eq!(
+        app.status_bar.flash_text(),
+        Some(complete::NOTHING_TO_COMPLETE)
+    );
 }
 
 #[test]
-fn nothing_is_asked_while_an_overlay_is_open() {
-    let mut app = typed_and_settled("add auth to");
-    app.thinking_picker
-        .open(&app.state.model, app.state.thinking);
-    assert!(!asks_to_complete(&mut app));
+fn a_slash_command_is_refused_out_loud() {
+    let mut app = typed("/model");
+    assert!(press_complete(&mut app).is_empty());
+    assert_eq!(app.status_bar.flash_text(), Some(complete::NOT_PROSE));
 }
 
 #[test]
-fn turning_it_off_stops_the_asking_and_drops_the_ghost() {
-    let mut app = typed_and_settled("add auth to");
-    app.input_box.set_ghost(Some(" login".into()));
-    app.toggle_completion();
-    assert!(!app.completion_enabled);
-    assert!(app.input_box.ghost().is_none());
-    assert!(!asks_to_complete(&mut app));
+fn a_shell_line_is_refused_out_loud() {
+    let mut app = typed("!ls -la");
+    assert!(press_complete(&mut app).is_empty());
+    assert_eq!(app.status_bar.flash_text(), Some(complete::NOT_PROSE));
+}
+
+#[test]
+fn asking_says_it_is_working() {
+    let mut app = typed("add auth to");
+    press_complete(&mut app);
+    assert_eq!(app.status_bar.flash_text(), Some(complete::WORKING));
+}
+
+/// The completion continues the end of the draft, so the cursor is moved there
+/// rather than the request being refused.
+#[test]
+fn asking_from_the_middle_moves_to_the_end() {
+    let mut app = typed("add auth to");
+    app.input_box.buffer.move_home();
+    press_complete(&mut app);
+    assert!(app.input_box.cursor_at_end());
 }
 
 #[test]
 fn a_completion_for_the_current_draft_becomes_the_ghost() {
-    let mut app = typed_and_settled("add auth to");
-    let (tx, rx) = flume::bounded(1);
-    tx.send(complete::Completion {
-        prefix: "add auth to".into(),
-        tail: " the login page".into(),
-    })
-    .unwrap();
-    app.completion_rx = Some(rx);
-    app.poll_completion();
+    let mut app = typed("add auth to");
+    deliver(
+        &mut app,
+        complete::Completion {
+            prefix: "add auth to".into(),
+            tail: Ok(" the login page".into()),
+        },
+    );
     assert_eq!(app.input_box.ghost(), Some(" the login page"));
 }
 
@@ -4571,29 +4564,65 @@ fn a_completion_for_the_current_draft_becomes_the_ghost() {
 /// text that has moved on would be nonsense.
 #[test]
 fn a_completion_for_an_older_draft_is_dropped() {
-    let mut app = typed_and_settled("add auth to");
-    let (tx, rx) = flume::bounded(1);
-    tx.send(complete::Completion {
-        prefix: "add au".into(),
-        tail: "th".into(),
-    })
-    .unwrap();
-    app.completion_rx = Some(rx);
-    app.poll_completion();
+    let mut app = typed("add auth to");
+    deliver(
+        &mut app,
+        complete::Completion {
+            prefix: "add au".into(),
+            tail: Ok("th".into()),
+        },
+    );
     assert!(app.input_box.ghost().is_none());
 }
 
 #[test]
+fn a_failure_is_reported() {
+    let mut app = typed("add auth to");
+    deliver(
+        &mut app,
+        complete::Completion {
+            prefix: "add auth to".into(),
+            tail: Err(complete::NO_COMPLETION.into()),
+        },
+    );
+    assert!(app.input_box.ghost().is_none());
+    assert_eq!(app.status_bar.flash_text(), Some(complete::NO_COMPLETION));
+}
+
+#[test]
 fn the_first_completion_explains_how_to_take_it() {
-    let mut app = typed_and_settled("add auth to");
-    let (tx, rx) = flume::bounded(1);
-    tx.send(complete::Completion {
-        prefix: "add auth to".into(),
-        tail: " login".into(),
-    })
-    .unwrap();
-    app.completion_rx = Some(rx);
-    app.poll_completion();
+    let mut app = typed("add auth to");
+    deliver(
+        &mut app,
+        complete::Completion {
+            prefix: "add auth to".into(),
+            tail: Ok(" login".into()),
+        },
+    );
     assert_eq!(app.status_bar.flash_text(), Some(complete::HINT));
     assert!(app.completion_hinted);
+}
+
+/// Said once. After that the ghost speaks for itself, and the "completing…"
+/// notice has to go rather than linger over a finished request.
+#[test]
+fn the_hint_is_not_repeated() {
+    let mut app = typed("add auth to");
+    app.completion_hinted = true;
+    press_complete(&mut app);
+    deliver(
+        &mut app,
+        complete::Completion {
+            prefix: "add auth to".into(),
+            tail: Ok(" login".into()),
+        },
+    );
+    assert!(app.status_bar.flash_text().is_none());
+}
+
+fn deliver(app: &mut App, completion: complete::Completion) {
+    let (tx, rx) = flume::bounded(1);
+    tx.send(completion).unwrap();
+    app.completion_rx = Some(rx);
+    app.poll_completion();
 }

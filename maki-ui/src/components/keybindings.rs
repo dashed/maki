@@ -141,6 +141,9 @@ pub mod key {
     pub const DELETE_WORD: Bind = ctrl_bind!('w');
     pub const SEARCH: Bind = ctrl_bind!('f');
     pub const FILE_PICKER: Bind = ctrl_bind!('s');
+    /// The last free ctrl letter, and ctrl rather than alt because alt types
+    /// accented characters on a stock macOS terminal.
+    pub const COMPLETE: Bind = ctrl_bind!('l');
     /// Sits with `Ctrl+1..3`, which pick a suggestion: same family, and every
     /// ctrl letter was already spoken for.
     pub const SHOW_SUGGESTIONS: Bind = Bind {
@@ -497,6 +500,12 @@ pub const KEYBINDS: &[Keybind] = &[
     Keybind {
         label: KeyLabel::Single(key::IMPROVE_PROMPT.label),
         description: "Improve the draft: edit it, or say how to reword it",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single(key::COMPLETE.label),
+        description: "Complete the draft you are typing",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },

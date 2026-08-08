@@ -273,6 +273,9 @@ impl InputBox {
     }
 
     pub fn discard(&mut self) {
+        // Every path that replaces the text drops the completion with it, or a
+        // ghost outlives the draft it was continuing.
+        self.ghost = None;
         self.pending_images.clear();
         self.history_index = None;
         self.draft.clear();
@@ -289,6 +292,7 @@ impl InputBox {
     }
 
     pub fn set_input(&mut self, s: String) {
+        self.ghost = None;
         self.buffer = TextBuffer::new(s);
     }
 
@@ -306,10 +310,6 @@ impl InputBox {
 
     pub fn ghost(&self) -> Option<&str> {
         self.ghost.as_deref().filter(|_| self.cursor_at_end())
-    }
-
-    pub fn clear_ghost(&mut self) {
-        self.ghost = None;
     }
 
     /// Word-wise leaves the rest of the completion in place, so a long one can
@@ -334,6 +334,7 @@ impl InputBox {
     /// finished from elsewhere, unlike history, which is recalled to be
     /// re-read from the start.
     pub fn set_input_at_end(&mut self, s: String) {
+        self.ghost = None;
         self.buffer = TextBuffer::new(s);
         self.buffer.move_to_end();
     }
@@ -1291,6 +1292,18 @@ mod tests {
         type_text(&mut input, "add auth");
         input.buffer.move_home();
         input.set_ghost(Some(" to login".into()));
+        assert!(input.ghost().is_none());
+    }
+
+    #[test_case(true  ; "submitted")]
+    #[test_case(false ; "recalled_from_history")]
+    fn replacing_the_text_drops_the_ghost(submit: bool) {
+        let mut input = ghosted("add auth", " to login");
+        if submit {
+            input.submit();
+        } else {
+            input.set_input("something else".into());
+        }
         assert!(input.ghost().is_none());
     }
 

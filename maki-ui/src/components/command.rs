@@ -100,11 +100,6 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         max_args: 1,
     },
     BuiltinCommand {
-        name: "/autocomplete",
-        description: "Toggle inline completion of the prompt you are typing",
-        max_args: 0,
-    },
-    BuiltinCommand {
         name: "/improve",
         description: "Open the prompt editor: edit a draft, or say how to reword it",
         max_args: usize::MAX,

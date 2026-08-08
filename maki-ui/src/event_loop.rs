@@ -55,7 +55,7 @@ const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
 const NOT_LIVE_ERR: &str = "session not live";
 const NO_SUGGEST_MODEL: &str = "no model assigned to the suggest role (pick one in /model)";
-const REWRITE_UNAVAILABLE: &str = "suggest model unavailable";
+const SUGGEST_UNAVAILABLE: &str = "suggest model unavailable";
 
 /// Tabs carry their in-memory sessions so `/reload` reopens them without a
 /// disk round-trip; `session_has_content` tells which ones were saved.
@@ -525,11 +525,9 @@ impl<'t> EventLoop<'t> {
     }
 
     fn tick(&mut self) {
-        let focused = self.focused;
-        let mut pending = Vec::new();
         for (i, rt) in self.sessions.iter_mut().enumerate() {
             rt.app.float_mgr.tick();
-            if i != focused {
+            if i != self.focused {
                 continue;
             }
             rt.app.tick_edge_scroll();
@@ -539,12 +537,8 @@ impl<'t> EventLoop<'t> {
             rt.app.poll_suggestions();
             rt.app.poll_rewrite();
             rt.app.poll_completion();
-            pending = rt.app.tick_completion();
             rt.app.status_bar.poll_branch_update();
             rt.app.mcp_picker.refresh();
-        }
-        if !pending.is_empty() {
-            self.dispatch(focused, pending);
         }
     }
 
@@ -1099,19 +1093,32 @@ impl<'t> EventLoop<'t> {
                 }
             }
             Action::Complete(prefix) => {
-                // Silent throughout: nobody asked for a completion, so an
-                // unpinned role or a dead provider is not worth a message.
-                if let Some(spec) = maki_providers::model_registry::model_registry()
+                // Reported rather than swallowed, unlike suggestions: the user
+                // pressed a key, so a key that silently does nothing would be
+                // indistinguishable from one that is broken.
+                let spec = maki_providers::model_registry::model_registry()
                     .read()
                     .unwrap()
-                    .spec_for_tier_any(maki_providers::ModelTier::Suggest)
-                    && let Ok(mut model) = Model::from_spec(&spec)
-                    && let Ok(provider) =
-                        maki_providers::provider::from_model(&mut model, self.ctx.timeouts)
-                {
-                    self.sessions[idx]
-                        .app
-                        .start_completion(Arc::from(provider), model, prefix);
+                    .spec_for_tier_any(maki_providers::ModelTier::Suggest);
+                let app = &mut self.sessions[idx].app;
+                match spec {
+                    None => app.fail_completion(NO_SUGGEST_MODEL.to_string()),
+                    Some(spec) => match Model::from_spec(&spec) {
+                        Err(e) => app.fail_completion(format!("{SUGGEST_UNAVAILABLE}: {e}")),
+                        Ok(mut model) => {
+                            match maki_providers::provider::from_model(
+                                &mut model,
+                                self.ctx.timeouts,
+                            ) {
+                                Err(e) => {
+                                    app.fail_completion(format!("{SUGGEST_UNAVAILABLE}: {e}"))
+                                }
+                                Ok(provider) => {
+                                    app.start_completion(Arc::from(provider), model, prefix)
+                                }
+                            }
+                        }
+                    },
                 }
             }
             Action::RewritePrompt { draft, instruction } => {
@@ -1127,13 +1134,13 @@ impl<'t> EventLoop<'t> {
                 match spec {
                     None => app.fail_rewrite(NO_SUGGEST_MODEL.to_string()),
                     Some(spec) => match Model::from_spec(&spec) {
-                        Err(e) => app.fail_rewrite(format!("{REWRITE_UNAVAILABLE}: {e}")),
+                        Err(e) => app.fail_rewrite(format!("{SUGGEST_UNAVAILABLE}: {e}")),
                         Ok(mut model) => {
                             match maki_providers::provider::from_model(
                                 &mut model,
                                 self.ctx.timeouts,
                             ) {
-                                Err(e) => app.fail_rewrite(format!("{REWRITE_UNAVAILABLE}: {e}")),
+                                Err(e) => app.fail_rewrite(format!("{SUGGEST_UNAVAILABLE}: {e}")),
                                 Ok(provider) => app.start_rewrite(
                                     Arc::from(provider),
                                     model,

@@ -1,23 +1,20 @@
-//! Finishes the sentence you are part-way through typing.
+//! Finishes the sentence you are part-way through typing, on request.
 //!
-//! The third thing the suggest model does, and the one with the tightest
-//! budget: it fires while you type rather than once a turn ends, so most of
-//! this module is about *not* asking. A request goes out only after typing
-//! stops, only once per distinct draft, and never while one is already in
-//! flight — which bounds it to roughly one call per pause rather than one per
-//! keystroke.
+//! Asked for with a keypress rather than volunteered on a timer. That is a
+//! cheaper design in the obvious way — no calls go out while you type — but the
+//! reason it reads better is that a completion nobody asked for has to be
+//! silent about failing, and this one does not: every refusal here says why,
+//! because a key that appears to do nothing is worse than a slow one.
 //!
-//! Failure is silent, like [`super::suggest`] and unlike [`super::rewrite`]:
-//! nobody asked for this, so nobody is owed an error.
+//! The conversation is deliberately not sent, as in [`super::rewrite`].
 //!
 //! The model is asked for the *whole* prompt rather than just the tail, and the
 //! tail is recovered by stripping the prefix back off. That costs a few tokens
-//! and buys the only reliable way to tell a good completion from a model that
+//! and buys the only reliable way to tell a real completion from a model that
 //! quietly reworded what the user already typed: if the reply does not start
 //! with their text verbatim, it is dropped rather than reconciled.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use flume::Sender;
 use maki_providers::provider::Provider;
@@ -27,11 +24,6 @@ use serde_json::Value;
 
 use super::{Action, App};
 
-/// Long enough that typing a word does not spend a call, short enough that a
-/// pause to think is answered before the thought is finished.
-const DEBOUNCE: Duration = Duration::from_millis(450);
-/// Below this there is not enough to continue, only to invent.
-const MIN_CHARS: usize = 6;
 /// A ghost longer than this stops being a hint and becomes a wall of text.
 const MAX_COMPLETION_CHARS: usize = 120;
 
@@ -44,53 +36,43 @@ adding at most one short sentence.\n- Finish the user's thought. Do not answer i
 start a new one.\n- Reply with the prompt only. No preamble, no explanation, no quotes, no code \
 fences.\n</system-reminder>";
 
-pub(crate) const HINT: &str = "completion ready: → accept, alt+→ one word, esc dismiss";
-pub(crate) const ON_MSG: &str = "Autocomplete: on";
-pub(crate) const OFF_MSG: &str = "Autocomplete: off";
+pub(crate) const HINT: &str = "→ accept, alt+→ one word, esc dismiss";
+pub(crate) const WORKING: &str = "completing…";
+pub(crate) const NOTHING_TO_COMPLETE: &str = "nothing to complete yet";
+pub(crate) const NOT_PROSE: &str = "completion is for prose, not commands";
+pub(crate) const NO_COMPLETION: &str = "no completion for this draft";
+pub(crate) const FAILED: &str = "completion failed";
 
 /// A completion, tagged with the draft it continues so it can be discarded if
 /// the user kept typing while it was in flight.
 pub(crate) struct Completion {
     pub(crate) prefix: String,
-    pub(crate) tail: String,
+    pub(crate) tail: Result<String, String>,
 }
 
 impl App {
-    /// Called from the render tick. Returns the request to make, if any.
-    pub(crate) fn tick_completion(&mut self) -> Vec<Action> {
-        let value = self.input_box.buffer.value();
-        if value != self.completion_input {
-            // Whatever is in flight was asked about older text, so it can only
-            // arrive wrong.
-            self.completion_rx = None;
-            self.completion_input = value;
-            self.completion_since = Some(Instant::now());
+    /// The keypress. Refusals are flashed rather than swallowed: the user
+    /// pressed a key and is owed an answer either way.
+    pub(crate) fn request_completion(&mut self) -> Vec<Action> {
+        if self.completion_rx.is_some() {
             return vec![];
         }
-        if !self.wants_completion() {
+        let prefix = self.input_box.buffer.value();
+        if prefix.trim().is_empty() {
+            self.flash(NOTHING_TO_COMPLETE.into());
             return vec![];
         }
-        let Some(since) = self.completion_since else {
-            return vec![];
-        };
-        if since.elapsed() < DEBOUNCE {
+        if !completable(&prefix) {
+            self.flash(NOT_PROSE.into());
             return vec![];
         }
-        // Recorded before the call goes out, so a draft that yields nothing is
-        // asked about once rather than on every tick that follows.
-        self.completion_asked = Some(self.completion_input.clone());
-        vec![Action::Complete(self.completion_input.clone())]
-    }
-
-    fn wants_completion(&self) -> bool {
-        self.completion_enabled
-            && self.completion_rx.is_none()
-            && self.completion_asked.as_deref() != Some(self.completion_input.as_str())
-            // A ghost already on screen is the answer to this draft.
-            && self.input_box.ghost().is_none()
-            && self.input_box.cursor_at_end()
-            && !self.any_overlay_open()
-            && completable(&self.completion_input)
+        if !self.input_box.cursor_at_end() {
+            // A completion continues the end of the text, so it would appear
+            // somewhere the cursor is not.
+            self.input_box.buffer.move_to_end();
+        }
+        self.flash(WORKING.into());
+        vec![Action::Complete(prefix)]
     }
 
     pub(crate) fn start_completion(
@@ -118,6 +100,7 @@ impl App {
         .detach();
     }
 
+    /// Called from the render tick.
     pub(crate) fn poll_completion(&mut self) {
         let Some(rx) = self.completion_rx.as_ref() else {
             return;
@@ -126,35 +109,32 @@ impl App {
             return;
         };
         self.completion_rx = None;
-        // The draft moved on while this was in flight.
+        // Typing does not stop while a request is in flight, and a completion
+        // for text that has moved on would be nonsense.
         if completion.prefix != self.input_box.buffer.value() {
             return;
         }
-        self.input_box.set_ghost(Some(completion.tail));
-        // An unexplained dim tail is a puzzle the first time. Said once, then
-        // never again for the rest of the session.
-        if self.input_box.ghost().is_some() && !self.completion_hinted {
-            self.completion_hinted = true;
-            self.flash(HINT.into());
+        match completion.tail {
+            Ok(tail) => {
+                self.input_box.set_ghost(Some(tail));
+                if self.input_box.ghost().is_some() {
+                    // An unexplained dim tail is a puzzle exactly once.
+                    if self.completion_hinted {
+                        self.status_bar.clear_flash();
+                    } else {
+                        self.completion_hinted = true;
+                        self.flash(HINT.into());
+                    }
+                }
+            }
+            Err(message) => self.flash(message),
         }
     }
 
-    /// Fires on every keystroke while enabled, so it is worth being able to
-    /// stop. Off also drops the ghost currently on screen.
-    pub(crate) fn toggle_completion(&mut self) {
-        self.completion_enabled = !self.completion_enabled;
-        if !self.completion_enabled {
-            self.input_box.clear_ghost();
-            self.completion_rx = None;
-        }
-        self.flash(
-            if self.completion_enabled {
-                ON_MSG
-            } else {
-                OFF_MSG
-            }
-            .into(),
-        )
+    /// The request never started.
+    pub(crate) fn fail_completion(&mut self, message: String) {
+        self.completion_rx = None;
+        self.flash(message);
     }
 }
 
@@ -162,10 +142,7 @@ impl App {
 /// already complete their own input better than a model could.
 fn completable(text: &str) -> bool {
     let trimmed = text.trim_start();
-    !trimmed.starts_with('/')
-        && !trimmed.starts_with('!')
-        && text.chars().count() >= MIN_CHARS
-        && !text.trim().is_empty()
+    !trimmed.starts_with('/') && !trimmed.starts_with('!')
 }
 
 async fn run_complete(
@@ -192,11 +169,13 @@ async fn run_complete(
         )
         .await;
 
-    if let Ok(response) = result
-        && let Some(tail) = parse_completion(&response.message, &prefix)
-    {
-        let _ = tx.send(Completion { prefix, tail });
-    }
+    let tail = match result {
+        Ok(response) => {
+            parse_completion(&response.message, &prefix).ok_or_else(|| NO_COMPLETION.to_string())
+        }
+        Err(e) => Err(format!("{FAILED}: {e}")),
+    };
+    let _ = tx.send(Completion { prefix, tail });
 }
 
 /// `None` whenever the reply is not the user's text plus something. Rejecting
@@ -215,8 +194,8 @@ fn parse_completion(message: &Message, prefix: &str) -> Option<String> {
 
     let full = strip_fence(full.trim_end());
     let tail = full.strip_prefix(prefix)?;
-    // One line only: a ghost that grows the input box by three rows while
-    // typing is worse than no ghost.
+    // One line only: a ghost that grows the input box by three rows is worse
+    // than no ghost.
     let tail = tail.split('\n').next()?.trim_end();
     if tail.is_empty() || tail.chars().count() > MAX_COMPLETION_CHARS {
         return None;
@@ -309,8 +288,6 @@ mod tests {
     #[test_case("/model",     false  ; "slash_command")]
     #[test_case("  /model",   false  ; "indented_slash_command")]
     #[test_case("!ls -la",    false  ; "shell")]
-    #[test_case("fix",        false  ; "too_short")]
-    #[test_case("       ",    false  ; "whitespace")]
     fn only_prose_is_worth_completing(text: &str, expected: bool) {
         assert_eq!(completable(text), expected);
     }

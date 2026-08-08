@@ -187,15 +187,7 @@ pub struct App {
     /// Identifies the current editing session, so a redraft owed to a closed
     /// one is dropped rather than landing on an unrelated draft.
     pub(super) rewrite_seq: u64,
-    /// Inline completion of the half-typed draft. Enabled by default and
-    /// harmless when it is: nothing happens unless the suggest role is pinned.
-    pub(super) completion_enabled: bool,
-    /// The draft the debounce is timing, and when it last changed.
-    pub(super) completion_input: String,
-    pub(super) completion_since: Option<std::time::Instant>,
-    /// The draft a request already went out for, so a draft that yields
-    /// nothing is asked about once rather than on every tick after it.
-    pub(super) completion_asked: Option<String>,
+    /// In-flight inline completion of the half-typed draft, if any.
     pub(super) completion_rx: Option<flume::Receiver<complete::Completion>>,
     pub(super) completion_hinted: bool,
     /// `/compact` finishes by emitting a normal `Done`, which is otherwise
@@ -300,10 +292,6 @@ impl App {
             prompt_editor: PromptEditor::new(),
             rewrite_rx: None,
             rewrite_seq: 0,
-            completion_enabled: true,
-            completion_input: String::new(),
-            completion_since: None,
-            completion_asked: None,
             completion_rx: None,
             completion_hinted: false,
             pending_compacts: 0,
@@ -910,6 +898,8 @@ impl App {
                 let top = self.chats[self.active_chat].scroll_top();
                 let auto = self.chats[self.active_chat].auto_scroll();
                 self.search_modal.open(top, auto);
+            } else if key::COMPLETE.matches(key) {
+                return self.request_completion();
             } else if key::FILE_PICKER.matches(key) {
                 self.file_picker.open(&self.state.session.cwd);
             } else if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
@@ -1519,10 +1509,6 @@ impl App {
             }
             "/effort" => {
                 self.set_effort(&cmd.args.trim().to_lowercase());
-                vec![]
-            }
-            "/autocomplete" => {
-                self.toggle_completion();
                 vec![]
             }
             "/improve" => {

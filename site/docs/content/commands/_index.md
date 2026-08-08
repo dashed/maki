@@ -28,7 +28,6 @@ Type `/` in the input box to open the command palette.
 | `/yolo` | Toggle YOLO mode (skip all permission prompts) |
 | `/thinking` | Toggle extended thinking (off, adaptive, effort level, or budget) |
 | `/effort` | Set reasoning effort for the current model, from the levels it supports |
-| `/autocomplete` | Toggle inline completion of the prompt you are typing |
 | `/improve` | Open the prompt editor: edit a draft, or say how to reword it |
 | `/provider` | Route OpenRouter to preferred upstreams (price/throughput/latency, or clear) |
 | `/fast` | Toggle Anthropic fast mode (Opus only) |
