@@ -205,6 +205,8 @@ pub enum Action {
     ClearEffort(String),
     /// Draft follow-up prompts for the turn that just ended.
     Suggest,
+    /// Continue the half-typed draft carried here, for inline completion.
+    Complete(String),
     /// Redraft the prompt held in the editor, following the user's instruction.
     RewritePrompt {
         draft: String,

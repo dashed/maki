@@ -525,9 +525,11 @@ impl<'t> EventLoop<'t> {
     }
 
     fn tick(&mut self) {
+        let focused = self.focused;
+        let mut pending = Vec::new();
         for (i, rt) in self.sessions.iter_mut().enumerate() {
             rt.app.float_mgr.tick();
-            if i != self.focused {
+            if i != focused {
                 continue;
             }
             rt.app.tick_edge_scroll();
@@ -536,8 +538,13 @@ impl<'t> EventLoop<'t> {
             rt.app.btw_modal.poll();
             rt.app.poll_suggestions();
             rt.app.poll_rewrite();
+            rt.app.poll_completion();
+            pending = rt.app.tick_completion();
             rt.app.status_bar.poll_branch_update();
             rt.app.mcp_picker.refresh();
+        }
+        if !pending.is_empty() {
+            self.dispatch(focused, pending);
         }
     }
 
@@ -1089,6 +1096,22 @@ impl<'t> EventLoop<'t> {
                     self.sessions[idx]
                         .app
                         .start_suggestions(Arc::from(provider), model);
+                }
+            }
+            Action::Complete(prefix) => {
+                // Silent throughout: nobody asked for a completion, so an
+                // unpinned role or a dead provider is not worth a message.
+                if let Some(spec) = maki_providers::model_registry::model_registry()
+                    .read()
+                    .unwrap()
+                    .spec_for_tier_any(maki_providers::ModelTier::Suggest)
+                    && let Ok(mut model) = Model::from_spec(&spec)
+                    && let Ok(provider) =
+                        maki_providers::provider::from_model(&mut model, self.ctx.timeouts)
+                {
+                    self.sessions[idx]
+                        .app
+                        .start_completion(Arc::from(provider), model, prefix);
                 }
             }
             Action::RewritePrompt { draft, instruction } => {

@@ -45,6 +45,8 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Esc Esc` | Rewind |
 | `Alt+O` | Edit input in external editor |
 | `Alt+I` | Improve the draft: edit it, or say how to reword it |
+| `→` | Accept the inline completion |
+| `Alt+→` | Accept one word of the inline completion |
 
 ### macOS-specific
 

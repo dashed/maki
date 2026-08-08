@@ -4462,3 +4462,138 @@ fn a_current_rewrite_becomes_the_draft() {
 
     assert_eq!(app.prompt_editor.draft(), "rewritten");
 }
+
+// ---------------------------------------------------------------------------
+// Inline completion
+// ---------------------------------------------------------------------------
+
+/// Puts the app in the state `tick_completion` reaches after typing settles.
+fn typed_and_settled(text: &str) -> App {
+    let mut app = test_app();
+    app.input_box.buffer.insert_text(text);
+    app.tick_completion();
+    app.completion_since = Some(Instant::now() - Duration::from_secs(1));
+    app
+}
+
+fn asks_to_complete(app: &mut App) -> bool {
+    matches!(&app.tick_completion()[..], [Action::Complete(_)])
+}
+
+#[test]
+fn a_settled_draft_is_completed() {
+    let mut app = typed_and_settled("add auth to");
+    match &app.tick_completion()[..] {
+        [Action::Complete(prefix)] => assert_eq!(prefix, "add auth to"),
+        _ => panic!("expected a completion request"),
+    }
+}
+
+/// The debounce is the whole cost control: without it every keystroke buys a
+/// call.
+#[test]
+fn a_draft_still_being_typed_is_left_alone() {
+    let mut app = test_app();
+    app.input_box.buffer.insert_text("add auth to");
+    app.tick_completion();
+    assert!(!asks_to_complete(&mut app));
+}
+
+#[test]
+fn typing_again_restarts_the_debounce() {
+    let mut app = typed_and_settled("add auth to");
+    app.input_box.buffer.insert_text(" the");
+    assert!(!asks_to_complete(&mut app));
+}
+
+/// One call per distinct draft. A draft that yields nothing must not be asked
+/// about again on every tick that follows.
+#[test]
+fn the_same_draft_is_only_asked_about_once() {
+    let mut app = typed_and_settled("add auth to");
+    assert!(asks_to_complete(&mut app));
+    app.completion_rx = None;
+    assert!(!asks_to_complete(&mut app));
+}
+
+#[test]
+fn a_draft_is_asked_about_again_after_it_changes() {
+    let mut app = typed_and_settled("add auth to");
+    assert!(asks_to_complete(&mut app));
+    app.completion_rx = None;
+    app.input_box.buffer.insert_text(" login");
+    app.tick_completion();
+    app.completion_since = Some(Instant::now() - Duration::from_secs(1));
+    assert!(asks_to_complete(&mut app));
+}
+
+#[test]
+fn nothing_is_asked_while_a_request_is_in_flight() {
+    let mut app = typed_and_settled("add auth to");
+    let (_tx, rx) = flume::bounded::<complete::Completion>(1);
+    app.completion_rx = Some(rx);
+    assert!(!asks_to_complete(&mut app));
+}
+
+#[test]
+fn nothing_is_asked_while_an_overlay_is_open() {
+    let mut app = typed_and_settled("add auth to");
+    app.thinking_picker
+        .open(&app.state.model, app.state.thinking);
+    assert!(!asks_to_complete(&mut app));
+}
+
+#[test]
+fn turning_it_off_stops_the_asking_and_drops_the_ghost() {
+    let mut app = typed_and_settled("add auth to");
+    app.input_box.set_ghost(Some(" login".into()));
+    app.toggle_completion();
+    assert!(!app.completion_enabled);
+    assert!(app.input_box.ghost().is_none());
+    assert!(!asks_to_complete(&mut app));
+}
+
+#[test]
+fn a_completion_for_the_current_draft_becomes_the_ghost() {
+    let mut app = typed_and_settled("add auth to");
+    let (tx, rx) = flume::bounded(1);
+    tx.send(complete::Completion {
+        prefix: "add auth to".into(),
+        tail: " the login page".into(),
+    })
+    .unwrap();
+    app.completion_rx = Some(rx);
+    app.poll_completion();
+    assert_eq!(app.input_box.ghost(), Some(" the login page"));
+}
+
+/// Typing does not stop while a request is in flight, and a completion for
+/// text that has moved on would be nonsense.
+#[test]
+fn a_completion_for_an_older_draft_is_dropped() {
+    let mut app = typed_and_settled("add auth to");
+    let (tx, rx) = flume::bounded(1);
+    tx.send(complete::Completion {
+        prefix: "add au".into(),
+        tail: "th".into(),
+    })
+    .unwrap();
+    app.completion_rx = Some(rx);
+    app.poll_completion();
+    assert!(app.input_box.ghost().is_none());
+}
+
+#[test]
+fn the_first_completion_explains_how_to_take_it() {
+    let mut app = typed_and_settled("add auth to");
+    let (tx, rx) = flume::bounded(1);
+    tx.send(complete::Completion {
+        prefix: "add auth to".into(),
+        tail: " login".into(),
+    })
+    .unwrap();
+    app.completion_rx = Some(rx);
+    app.poll_completion();
+    assert_eq!(app.status_bar.flash_text(), Some(complete::HINT));
+    assert!(app.completion_hinted);
+}

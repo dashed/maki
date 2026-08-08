@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -7,7 +8,7 @@ use crate::highlight;
 use crate::text_buffer::{EditResult, TextBuffer, is_newline_key};
 use crate::theme;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use maki_storage::input_history::InputHistory;
 use std::mem;
 
@@ -79,6 +80,9 @@ pub struct InputBox {
     max_input_lines: u16,
     last_total_lines: u16,
     last_content_height: u16,
+    /// Inline completion offered after the cursor, drawn dimmed and not part
+    /// of the text until accepted.
+    ghost: Option<String>,
 }
 
 impl InputBox {
@@ -92,6 +96,22 @@ impl InputBox {
             }
             KeyCode::Down if self.is_at_last_line() => {
                 self.history_down();
+                return InputAction::None;
+            }
+            // Fish's idiom, and the reason the accept key is an arrow rather
+            // than tab: right at the end of the line does nothing otherwise,
+            // so nothing has to be given up to make room for it.
+            KeyCode::Right if self.ghost.is_some() && self.cursor_at_end() => {
+                let word_only = key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
+                self.accept_ghost(word_only);
+                return InputAction::PaletteSync(self.buffer.value());
+            }
+            // Consumed, so dismissing a completion cannot also rewind the
+            // session on the way past.
+            KeyCode::Esc if self.ghost.is_some() => {
+                self.ghost = None;
                 return InputAction::None;
             }
             KeyCode::Tab | KeyCode::Esc => return InputAction::Passthrough(key),
@@ -113,8 +133,17 @@ impl InputBox {
         }
 
         match self.buffer.handle_key(key) {
-            EditResult::Changed => InputAction::PaletteSync(self.buffer.value()),
-            EditResult::Moved | EditResult::Ignored => InputAction::None,
+            EditResult::Changed => {
+                self.ghost = None;
+                InputAction::PaletteSync(self.buffer.value())
+            }
+            EditResult::Moved => {
+                // A completion continues the end of the text, so it stops
+                // meaning anything once the cursor is somewhere else.
+                self.ghost = None;
+                InputAction::None
+            }
+            EditResult::Ignored => InputAction::None,
         }
     }
 
@@ -172,6 +201,7 @@ impl InputBox {
             max_input_lines,
             last_total_lines: 1,
             last_content_height: 1,
+            ghost: None,
         }
     }
 
@@ -200,7 +230,7 @@ impl InputBox {
 
     pub fn height(&self, width: u16) -> u16 {
         let ew = effective_width(width as usize);
-        let mut visual_lines = total_visual_lines(&self.buffer, ew, true);
+        let mut visual_lines = total_visual_lines(&self.buffer, ew, true, self.ghost());
         if !self.pending_images.is_empty() {
             visual_lines += 1;
         }
@@ -260,6 +290,44 @@ impl InputBox {
 
     pub fn set_input(&mut self, s: String) {
         self.buffer = TextBuffer::new(s);
+    }
+
+    pub fn cursor_at_end(&self) -> bool {
+        let lines = self.buffer.lines();
+        self.buffer.y() + 1 == lines.len()
+            && self.buffer.x() == lines[self.buffer.y()].chars().count()
+    }
+
+    /// Shown only while the cursor is at the end, since that is the only place
+    /// a continuation makes sense.
+    pub fn set_ghost(&mut self, text: Option<String>) {
+        self.ghost = text.filter(|t| !t.is_empty() && self.cursor_at_end());
+    }
+
+    pub fn ghost(&self) -> Option<&str> {
+        self.ghost.as_deref().filter(|_| self.cursor_at_end())
+    }
+
+    pub fn clear_ghost(&mut self) {
+        self.ghost = None;
+    }
+
+    /// Word-wise leaves the rest of the completion in place, so a long one can
+    /// be taken a piece at a time instead of all or nothing.
+    fn accept_ghost(&mut self, word_only: bool) {
+        let Some(ghost) = self.ghost.take() else {
+            return;
+        };
+        if !word_only {
+            self.buffer.insert_text(&ghost);
+            return;
+        }
+        let taken = first_word(&ghost);
+        self.buffer.insert_text(taken);
+        let rest = &ghost[taken.len()..];
+        if !rest.is_empty() {
+            self.ghost = Some(rest.to_string());
+        }
     }
 
     /// Cursor lands at the end, ready to keep typing. For text that arrived
@@ -346,7 +414,7 @@ impl InputBox {
             }
         }
 
-        let mut total_vl = total_visual_lines(&self.buffer, ew, focused) as u16;
+        let mut total_vl = total_visual_lines(&self.buffer, ew, focused, self.ghost()) as u16;
         if !self.pending_images.is_empty() {
             total_vl += 1;
         }
@@ -387,24 +455,42 @@ impl InputBox {
         } else {
             let cursor_y = self.buffer.y();
             let cursor_x = self.buffer.x();
+            let ghost = if focused { self.ghost() } else { None };
+            let last = self.buffer.lines().len().saturating_sub(1);
             self.buffer
                 .lines()
                 .iter()
                 .enumerate()
                 .flat_map(|(i, line)| {
                     let is_cursor_line = i == cursor_y && focused;
-                    let shell_spans = if i == 0 {
-                        shell_highlight_spans(line)
-                    } else {
-                        None
+                    // Wrapped as one string with the ghost attached, so a
+                    // completion that runs past the edge breaks where the text
+                    // would have. The pre-styled spans are what keep it dim,
+                    // reusing the same slot shell highlighting uses.
+                    let (text, styled) = match ghost.filter(|_| i == last) {
+                        Some(g) => (
+                            Cow::Owned(format!("{line}{g}")),
+                            Some(vec![
+                                Span::raw(line.clone()),
+                                Span::styled(g.to_string(), theme::current().input_placeholder),
+                            ]),
+                        ),
+                        None => (Cow::Borrowed(line.as_str()), None),
                     };
+                    let styled = styled.or_else(|| {
+                        if i == 0 {
+                            shell_highlight_spans(line)
+                        } else {
+                            None
+                        }
+                    });
                     wrap_line(
-                        line,
+                        &text,
                         ew,
                         is_cursor_line,
                         cursor_x,
                         i == 0,
-                        shell_spans.as_deref(),
+                        styled.as_deref(),
                     )
                 })
                 .collect()
@@ -610,20 +696,44 @@ fn overlay_cursor(spans: Vec<Span<'static>>, cursor_char_pos: usize) -> Vec<Span
     result
 }
 
-fn total_visual_lines(buffer: &TextBuffer, ew: usize, cursor_visible: bool) -> usize {
+fn total_visual_lines(
+    buffer: &TextBuffer,
+    ew: usize,
+    cursor_visible: bool,
+    ghost: Option<&str>,
+) -> usize {
     let cursor_y = buffer.y();
+    let last = buffer.lines().len().saturating_sub(1);
     buffer
         .lines()
         .iter()
         .enumerate()
         .map(|(i, line)| {
             let mut text_len = line.width();
+            // The ghost shares the last line, so the box has to grow for it or
+            // its tail is drawn outside the border.
+            if i == last {
+                text_len += ghost.map_or(0, str::width);
+            }
             if cursor_visible && i == cursor_y {
                 text_len += 1;
             }
             visual_line_count(text_len, ew)
         })
         .sum()
+}
+
+/// Includes the whitespace that follows, so repeated word-wise accepts do not
+/// jam the words together.
+fn first_word(text: &str) -> &str {
+    let after_lead = text.trim_start_matches(char::is_whitespace);
+    let lead = text.len() - after_lead.len();
+    let word_end = after_lead
+        .find(char::is_whitespace)
+        .map_or(text.len(), |i| lead + i);
+    let rest = &text[word_end..];
+    let trailing = rest.len() - rest.trim_start_matches(char::is_whitespace).len();
+    &text[..word_end + trailing]
 }
 
 #[cfg(test)]
@@ -635,6 +745,18 @@ mod tests {
     fn type_text(input: &mut InputBox, text: &str) {
         for c in text.chars() {
             input.buffer.push_char(c);
+        }
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    /// Goes through `handle_key`, unlike `type_text`, so the ghost-clearing
+    /// that lives there actually runs.
+    fn press_chars(input: &mut InputBox, text: &str) {
+        for c in text.chars() {
+            input.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE));
         }
     }
 
@@ -1072,5 +1194,116 @@ mod tests {
         type_text(&mut input, "read");
         input.handle_paste_with_spaces("file.rs");
         assert_eq!(input.buffer.value(), "read file.rs");
+    }
+
+    fn ghosted(text: &str, ghost: &str) -> InputBox {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        type_text(&mut input, text);
+        input.set_ghost(Some(ghost.to_string()));
+        input
+    }
+
+    #[test]
+    fn the_ghost_is_drawn_after_the_text() {
+        let mut input = ghosted("add auth", " to login");
+        let terminal = render_input(&mut input, 40, 5);
+        assert!(rendered_row(&terminal, 1).contains("add auth to login"));
+    }
+
+    /// Dim, or it reads as text the user typed.
+    #[test]
+    fn the_ghost_is_dimmed_and_the_typed_text_is_not() {
+        let mut input = ghosted("add auth", " to login");
+        let terminal = render_input(&mut input, 40, 5);
+        let buf = terminal.backend().buffer();
+        let ghost_style = theme::current().input_placeholder;
+        // Column 2 is the first character after the chevron.
+        assert_ne!(buf.cell((2, 1)).unwrap().style().fg, ghost_style.fg);
+        let tail_col = 2 + "add auth to log".len() as u16;
+        assert_eq!(buf.cell((tail_col, 1)).unwrap().style().fg, ghost_style.fg);
+    }
+
+    #[test]
+    fn the_ghost_is_not_part_of_the_text() {
+        let input = ghosted("add auth", " to login");
+        assert_eq!(input.buffer.value(), "add auth");
+    }
+
+    #[test]
+    fn right_at_the_end_accepts_the_whole_ghost() {
+        let mut input = ghosted("add auth", " to login");
+        input.handle_key(key(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(input.buffer.value(), "add auth to login");
+        assert!(input.ghost().is_none());
+    }
+
+    #[test]
+    fn alt_right_accepts_one_word_and_keeps_the_rest() {
+        let mut input = ghosted("add auth", " to login page");
+        input.handle_key(key(KeyCode::Right, KeyModifiers::ALT));
+        assert_eq!(input.buffer.value(), "add auth to ");
+        assert_eq!(input.ghost(), Some("login page"));
+    }
+
+    #[test]
+    fn repeated_word_accepts_consume_the_whole_ghost() {
+        let mut input = ghosted("add auth", " to login");
+        for _ in 0..3 {
+            input.handle_key(key(KeyCode::Right, KeyModifiers::ALT));
+        }
+        assert_eq!(input.buffer.value(), "add auth to login");
+        assert!(input.ghost().is_none());
+    }
+
+    #[test]
+    fn esc_dismisses_the_ghost_without_escaping_further() {
+        let mut input = ghosted("add auth", " to login");
+        assert!(matches!(
+            input.handle_key(key(KeyCode::Esc, KeyModifiers::NONE)),
+            InputAction::None
+        ));
+        assert!(input.ghost().is_none());
+        // With no ghost left, esc goes back to meaning what it used to.
+        assert!(matches!(
+            input.handle_key(key(KeyCode::Esc, KeyModifiers::NONE)),
+            InputAction::Passthrough(_)
+        ));
+    }
+
+    #[test]
+    fn typing_drops_a_stale_ghost() {
+        let mut input = ghosted("add auth", " to login");
+        press_chars(&mut input, "e");
+        assert!(input.ghost().is_none());
+    }
+
+    /// It continues the end of the text, so it means nothing anywhere else.
+    #[test]
+    fn moving_off_the_end_drops_the_ghost() {
+        let mut input = ghosted("add auth", " to login");
+        input.handle_key(key(KeyCode::Left, KeyModifiers::NONE));
+        assert!(input.ghost().is_none());
+    }
+
+    #[test]
+    fn a_ghost_is_refused_when_the_cursor_is_not_at_the_end() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        type_text(&mut input, "add auth");
+        input.buffer.move_home();
+        input.set_ghost(Some(" to login".into()));
+        assert!(input.ghost().is_none());
+    }
+
+    /// Without this the tail is drawn past the bottom border.
+    #[test]
+    fn the_box_grows_for_a_ghost_that_wraps() {
+        let mut plain = InputBox::new(InputHistory::default(), 20);
+        type_text(&mut plain, "add auth");
+        let before = plain.height(20);
+        let mut input = ghosted("add auth", &" to the login page".repeat(3));
+        let grown = input.height(20);
+        assert!(grown > before);
+        // And the extra rows are real: nothing is clipped.
+        render_input(&mut input, 20, grown);
     }
 }
