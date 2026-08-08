@@ -9,7 +9,9 @@ group = "Reference"
 
 Maki talks to LLM providers over their HTTP APIs. Models are split into three tiers: **weak** (cheap and fast), **medium** (balanced), and **strong** (highest capability, highest cost). There is also a **compaction** tier for choosing a dedicated model to summarize context when the conversation grows long.
 
-Open the model picker with `/model` and press `!`, `@`, `#`, or `$` on any row to assign it to strong, medium, weak, or compaction. Press the same key again to remove the assignment. Your overrides are saved to `~/.local/state/maki/model-tiers` and apply across sessions.
+Open the model picker with `/model` and press `!`, `@`, `#`, `$`, or `%` on any row to assign it to strong, medium, weak, compaction, or suggest. Press the same key again to remove the assignment. The rows at the top of the picker show which model currently holds each role. Your overrides are saved to `~/.local/state/maki/model-tiers` and apply across sessions.
+
+Strong, medium and weak are the roles the agent itself runs on. Compaction and suggest are side jobs, so a model can hold one of those and a real role at once without confusing which model the agent picks. Neither side job is ever assigned for you: nothing summarizes history or drafts follow-up prompts until you choose a model for it, which is the moment to pick something cheap.
 
 ## Auth Reloading
 
@@ -316,6 +318,35 @@ supports_vision = false
 | `discover_models` | bool | When true, also probe the provider's model list endpoint (default false) |
 | `enable_free_models` | bool | Opencode only. Show free catalog models (default false) |
 | `models` | array | Declared models for custom providers (see below) |
+| `routing` | table | OpenRouter only. Which upstream to prefer (see below) |
+
+### Provider routing
+
+OpenRouter brokers the same model across many upstreams and picks one for you.
+When you care which, say so under `routing`:
+
+```toml
+[openrouter.routing]
+sort = "throughput"            # price | throughput | latency
+ignore = ["some-upstream"]     # never route here
+only = ["together", "azure"]   # when set, the only upstreams allowed
+data_collection = "deny"       # allow (default) | deny, for upstreams that train on your data
+```
+
+`sort = "throughput"` is what `:nitro` does, and `sort = "price"` what `:floor`
+does, without the model-id suffix. Prefer this: a suffixed id matches nothing in
+the model catalog, so pricing, context window and reasoning levels all silently
+fall back to defaults.
+
+Know what `sort` costs you. Left unset, OpenRouter load balances across healthy
+upstreams and skips any that saw an outage in the last 30 seconds. Setting
+`sort` turns that off and walks a fixed order instead, so chasing throughput
+also gives up the outage dodging. Set it when speed matters more than a retry,
+and leave it alone when it does not.
+
+`/provider price|throughput|latency` overrides the sort for the session, and
+`/provider clear` returns to this file. The session override replaces the file's
+routing entirely, so what you ask for is what gets sent.
 
 ### Model fields
 

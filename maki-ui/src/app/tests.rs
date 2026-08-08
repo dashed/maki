@@ -2116,6 +2116,38 @@ fn apply_loaded_session_defers_queued_messages_until_respawn() {
     assert_eq!(app.state.session.meta.queued_messages, ["deferred"]);
 }
 
+/// Draws the whole app to an off-screen terminal and flattens it, so a test can
+/// assert on what is actually on screen rather than on the state behind it.
+fn render_contains(app: &mut App, needle: &str) -> bool {
+    let area = Rect::new(0, 0, 100, 24);
+    let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.view(frame)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let screen: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+    screen.contains(needle)
+}
+
+/// The flash only fires at the moment of the toggle, so starting with `--yolo`
+/// used to leave nothing on screen at all. The bar has to carry it.
+#[test]
+fn yolo_shows_in_the_status_bar_for_as_long_as_it_is_on() {
+    use crate::components::status_bar::YOLO_LABEL;
+
+    let mut app = test_app();
+    assert!(!render_contains(&mut app, YOLO_LABEL.trim()));
+
+    app.execute_command(cmd("/yolo"));
+    assert!(
+        render_contains(&mut app, YOLO_LABEL.trim()),
+        "yolo must be visible while it is on"
+    );
+
+    app.execute_command(cmd("/yolo"));
+    assert!(!render_contains(&mut app, YOLO_LABEL.trim()));
+}
+
 #[test]
 fn yolo_toggle() {
     let mut app = test_app();
@@ -3370,16 +3402,160 @@ fn bash_prefix_overrides_mode() {
     assert_eq!(&*app.mode_label().0, "[BUILD]");
 }
 
+/// Bare `/thinking` used to blind-toggle off and adaptive, which never showed
+/// what the other options were. It opens the picker now, and opening alone must
+/// not change the setting.
+const SUGGEST_PROMPTS: [&str; 2] = ["run the tests", "open a PR"];
+
+fn suggest_prompts() -> Vec<String> {
+    SUGGEST_PROMPTS.iter().map(|s| s.to_string()).collect()
+}
+
+fn ctrl_key(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+#[test_case('1', Some(SUGGEST_PROMPTS[0]) ; "first")]
+#[test_case('2', Some(SUGGEST_PROMPTS[1]) ; "second")]
+#[test_case('3', None                     ; "past_the_end")]
+fn ctrl_digit_picks_a_suggestion_by_position(digit: char, expected: Option<&str>) {
+    assert_eq!(
+        super::accepted_suggestion(ctrl_key(digit), &suggest_prompts()).as_deref(),
+        expected
+    );
+}
+
 #[test]
-fn thinking_toggle_cycles_off_adaptive() {
+fn tab_takes_the_top_suggestion() {
+    assert_eq!(
+        super::accepted_suggestion(key(KeyCode::Tab), &suggest_prompts()).as_deref(),
+        Some(SUGGEST_PROMPTS[0])
+    );
+}
+
+/// Tab only claims the suggestion while one is on screen; the rest of the time
+/// it still has to toggle mode.
+#[test]
+fn tab_toggles_mode_when_no_suggestions_are_up() {
+    let mut app = test_app();
+    assert!(app.suggestions.is_empty());
+    let before = app.mode_label().0.to_string();
+
+    app.update(Msg::Key(key(KeyCode::Tab)));
+
+    assert_ne!(app.mode_label().0.to_string(), before);
+}
+
+/// Re-showing must not cost another call, so dismissing hides rather than
+/// throws away.
+#[test]
+fn dismissing_keeps_the_prompts_for_ctrl_zero() {
+    let mut app = test_app();
+    app.suggestions = suggest_prompts();
+
+    app.update(Msg::Key(key(KeyCode::Char('x'))));
+    assert!(!app.showing_suggestions(), "typing should hide them");
+    assert!(!app.suggestions.is_empty(), "but not discard them");
+
+    app.update(Msg::Key(kb::SHOW_SUGGESTIONS.to_key_event()));
+    assert!(app.showing_suggestions(), "ctrl+0 should bring them back");
+}
+
+/// They answer the turn that produced them, so a new turn drops them for good.
+#[test]
+fn a_new_turn_discards_the_old_suggestions() {
+    let mut app = test_app();
+    app.suggestions = suggest_prompts();
+
+    // Type and submit, which is the only way a turn actually starts.
+    app.update(Msg::Key(key(KeyCode::Char('h'))));
+    app.update(Msg::Key(key(KeyCode::Char('i'))));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert!(app.suggestions.is_empty());
+    app.update(Msg::Key(kb::SHOW_SUGGESTIONS.to_key_event()));
+    assert!(!app.showing_suggestions(), "ctrl+0 must not resurrect them");
+}
+
+/// The whole point is that you can type over the suggestions, so a bare digit
+/// has to reach the input box instead of picking one.
+#[test]
+fn a_bare_digit_is_not_a_suggestion_accept() {
+    assert_eq!(
+        super::accepted_suggestion(key(KeyCode::Char('1')), &suggest_prompts()),
+        None
+    );
+}
+
+#[test_case(KeyCode::Char('a') ; "typing")]
+#[test_case(KeyCode::Enter     ; "submitting")]
+#[test_case(KeyCode::Esc       ; "escaping")]
+#[test_case(KeyCode::Backspace ; "deleting")]
+fn moving_on_dismisses_suggestions(code: KeyCode) {
+    assert!(super::dismisses_suggestions(key(code)));
+}
+
+/// Reading back over the answer should not throw the suggestions away.
+#[test_case(KeyCode::Up       ; "scroll_up")]
+#[test_case(KeyCode::PageDown ; "page_down")]
+#[test_case(KeyCode::Left     ; "cursor_move")]
+fn navigating_keeps_suggestions(code: KeyCode) {
+    assert!(!super::dismisses_suggestions(key(code)));
+}
+
+/// Every one of these is a paid call, so each suppression gets its own case.
+#[test]
+fn suggestions_are_wanted_after_an_ordinary_turn() {
+    let app = test_app();
+    assert!(app.wants_suggestions(false));
+}
+
+#[test]
+fn a_compact_does_not_buy_suggestions() {
+    let app = test_app();
+    assert!(!app.wants_suggestions(true));
+}
+
+#[test]
+fn exiting_after_one_turn_does_not_buy_suggestions() {
+    let mut app = test_app();
+    app.exit_on_done = true;
+    assert!(!app.wants_suggestions(false));
+}
+
+/// `/compact` reaches turn end through the same Done arm as a real turn, so the
+/// counter is the only thing telling them apart.
+#[test]
+fn compact_command_arms_the_suppression() {
+    let mut app = test_app();
+    assert_eq!(app.pending_compacts, 0);
+    app.execute_command(cmd("/compact"));
+    assert_eq!(app.pending_compacts, 1);
+}
+
+#[test]
+fn thinking_without_args_opens_picker_without_changing_setting() {
     let mut app = test_app();
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
 
     app.execute_command(cmd("/thinking"));
-    assert_eq!(app.state.thinking, ThinkingConfig::Adaptive);
 
-    app.execute_command(cmd("/thinking"));
+    assert!(app.thinking_picker.is_open());
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
+}
+
+#[test]
+fn thinking_picker_selection_applies_and_closes() {
+    let mut app = test_app();
+    app.execute_command(cmd("/thinking"));
+    assert!(app.thinking_picker.is_open());
+
+    // First row is off, second is adaptive.
+    app.update(Msg::Key(key(KeyCode::Down)));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert_eq!(app.state.thinking, ThinkingConfig::Adaptive);
+    assert!(!app.thinking_picker.is_open());
 }
 
 #[test]
@@ -4161,4 +4337,358 @@ fn turn_end_keeps_only_the_subagents_that_finished() {
         .map(|sa| sa.tool_use_id.as_str())
         .collect();
     assert_eq!(ids, [FINISHED_TASK_ID]);
+}
+
+// ---------------------------------------------------------------------------
+// Prompt editor
+// ---------------------------------------------------------------------------
+
+fn open_editor_with(draft: &str) -> App {
+    let mut app = test_app();
+    app.input_box.buffer.insert_text(draft);
+    app.update(Msg::Key(kb::IMPROVE_PROMPT.to_key_event()));
+    app
+}
+
+#[test]
+fn alt_i_opens_the_prompt_editor_on_the_current_draft() {
+    let app = open_editor_with("add auth");
+    assert!(app.prompt_editor.is_open());
+    assert_eq!(app.prompt_editor.draft(), "add auth");
+}
+
+/// The draft is copied, not moved: abandoning the editor has to leave the user
+/// exactly where they were.
+#[test]
+fn opening_the_editor_leaves_the_input_box_alone() {
+    let mut app = open_editor_with("add auth");
+    assert_eq!(app.input_box.buffer.value(), "add auth");
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!app.prompt_editor.is_open());
+    assert_eq!(app.input_box.buffer.value(), "add auth");
+}
+
+#[test]
+fn the_editor_swallows_keys_meant_for_the_input_box() {
+    let mut app = open_editor_with("add auth");
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Char('x'))));
+    assert_eq!(app.input_box.buffer.value(), "add auth");
+}
+
+#[test]
+fn accepting_replaces_the_draft_in_the_input_box() {
+    let mut app = open_editor_with("add auth");
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Tab)));
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Char('!'))));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('s'),
+        KeyModifiers::CONTROL,
+    )));
+
+    assert!(!app.prompt_editor.is_open());
+    assert_eq!(app.input_box.buffer.value(), "add auth!");
+}
+
+#[test]
+fn an_instruction_asks_for_a_rewrite() {
+    let mut app = open_editor_with("add auth");
+    for c in "shorter".chars() {
+        app.update(Msg::Key(KeyEvent::from(KeyCode::Char(c))));
+    }
+    let actions = app.update(Msg::Key(KeyEvent::from(KeyCode::Enter)));
+    match &actions[..] {
+        [Action::RewritePrompt { draft, instruction }] => {
+            assert_eq!(draft, "add auth");
+            assert_eq!(instruction, "shorter");
+        }
+        _ => panic!("expected a rewrite"),
+    }
+}
+
+#[test]
+fn improve_command_takes_the_rest_of_the_line_as_the_draft() {
+    let mut app = test_app();
+    app.execute_command(ParsedCommand {
+        name: "/improve".into(),
+        args: "add auth to login".into(),
+    });
+    assert!(app.prompt_editor.is_open());
+    assert_eq!(app.prompt_editor.draft(), "add auth to login");
+}
+
+#[test]
+fn improve_command_with_no_args_opens_an_empty_editor() {
+    let mut app = test_app();
+    app.execute_command(ParsedCommand {
+        name: "/improve".into(),
+        args: String::new(),
+    });
+    assert!(app.prompt_editor.is_open());
+    assert_eq!(app.prompt_editor.draft(), "");
+}
+
+/// A redraft owed to a session the user has already left must not land on the
+/// draft they opened next.
+#[test]
+fn a_stale_rewrite_is_dropped() {
+    let mut app = open_editor_with("first");
+    let stale = app.rewrite_seq;
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Esc)));
+    app.open_prompt_editor("second");
+
+    let (tx, rx) = flume::bounded(1);
+    tx.send(rewrite::Rewrite {
+        seq: stale,
+        text: Ok("rewritten first".into()),
+    })
+    .unwrap();
+    app.rewrite_rx = Some(rx);
+    app.poll_rewrite();
+
+    assert_eq!(app.prompt_editor.draft(), "second");
+}
+
+#[test]
+fn a_current_rewrite_becomes_the_draft() {
+    let mut app = open_editor_with("first");
+    let (tx, rx) = flume::bounded(1);
+    tx.send(rewrite::Rewrite {
+        seq: app.rewrite_seq,
+        text: Ok("rewritten".into()),
+    })
+    .unwrap();
+    app.rewrite_rx = Some(rx);
+    app.poll_rewrite();
+
+    assert_eq!(app.prompt_editor.draft(), "rewritten");
+}
+
+// ---------------------------------------------------------------------------
+// Inline completion
+// ---------------------------------------------------------------------------
+
+fn press_complete(app: &mut App) -> Vec<Action> {
+    app.update(Msg::Key(kb::COMPLETE.to_key_event()))
+}
+
+fn typed(text: &str) -> App {
+    let mut app = test_app();
+    app.input_box.buffer.insert_text(text);
+    app
+}
+
+#[test]
+fn the_key_asks_for_a_completion_of_the_draft() {
+    let mut app = typed("add auth to");
+    match &press_complete(&mut app)[..] {
+        [Action::Complete(prefix)] => assert_eq!(prefix, "add auth to"),
+        _ => panic!("expected a completion request"),
+    }
+}
+
+/// Nothing goes out on its own: this is the whole point of the key.
+#[test]
+fn nothing_is_asked_for_without_the_key() {
+    let mut app = typed("add auth to");
+    for c in " the login".chars() {
+        app.update(Msg::Key(KeyEvent::from(KeyCode::Char(c))));
+    }
+    assert!(app.completion_rx.is_none());
+}
+
+#[test]
+fn a_second_press_is_ignored_while_one_is_in_flight() {
+    let mut app = typed("add auth to");
+    let (_tx, rx) = flume::bounded::<complete::Completion>(1);
+    app.completion_rx = Some(rx);
+    assert!(press_complete(&mut app).is_empty());
+}
+
+/// A key that appears to do nothing is worse than a slow one, so every refusal
+/// says why.
+#[test]
+fn an_empty_draft_is_refused_out_loud() {
+    let mut app = test_app();
+    assert!(press_complete(&mut app).is_empty());
+    assert_eq!(
+        app.status_bar.flash_text(),
+        Some(complete::NOTHING_TO_COMPLETE)
+    );
+}
+
+#[test]
+fn a_slash_command_is_refused_out_loud() {
+    let mut app = typed("/model");
+    assert!(press_complete(&mut app).is_empty());
+    assert_eq!(app.status_bar.flash_text(), Some(complete::NOT_PROSE));
+}
+
+#[test]
+fn a_shell_line_is_refused_out_loud() {
+    let mut app = typed("!ls -la");
+    assert!(press_complete(&mut app).is_empty());
+    assert_eq!(app.status_bar.flash_text(), Some(complete::NOT_PROSE));
+}
+
+#[test]
+fn asking_says_it_is_working() {
+    let mut app = typed("add auth to");
+    press_complete(&mut app);
+    assert_eq!(app.status_bar.flash_text(), Some(complete::WORKING));
+}
+
+/// The completion continues the end of the draft, so the cursor is moved there
+/// rather than the request being refused.
+#[test]
+fn asking_from_the_middle_moves_to_the_end() {
+    let mut app = typed("add auth to");
+    app.input_box.buffer.move_home();
+    press_complete(&mut app);
+    assert!(app.input_box.cursor_at_end());
+}
+
+#[test]
+fn a_completion_for_the_current_draft_becomes_the_ghost() {
+    let mut app = typed("add auth to");
+    deliver(
+        &mut app,
+        complete::Completion {
+            prefix: "add auth to".into(),
+            tail: Ok(" the login page".into()),
+        },
+    );
+    assert_eq!(app.input_box.ghost(), Some(" the login page"));
+}
+
+/// Typing does not stop while a request is in flight, and a completion for
+/// text that has moved on would be nonsense.
+#[test]
+fn a_completion_for_an_older_draft_is_dropped() {
+    let mut app = typed("add auth to");
+    deliver(
+        &mut app,
+        complete::Completion {
+            prefix: "add au".into(),
+            tail: Ok("th".into()),
+        },
+    );
+    assert!(app.input_box.ghost().is_none());
+}
+
+#[test]
+fn a_failure_is_reported() {
+    let mut app = typed("add auth to");
+    deliver(
+        &mut app,
+        complete::Completion {
+            prefix: "add auth to".into(),
+            tail: Err(complete::NO_COMPLETION.into()),
+        },
+    );
+    assert!(app.input_box.ghost().is_none());
+    assert_eq!(app.status_bar.flash_text(), Some(complete::NO_COMPLETION));
+}
+
+#[test]
+fn the_first_completion_explains_how_to_take_it() {
+    let mut app = typed("add auth to");
+    deliver(
+        &mut app,
+        complete::Completion {
+            prefix: "add auth to".into(),
+            tail: Ok(" login".into()),
+        },
+    );
+    assert_eq!(app.status_bar.flash_text(), Some(complete::HINT));
+    assert!(app.completion_hinted);
+}
+
+/// Said once. After that the ghost speaks for itself, and the "completing…"
+/// notice has to go rather than linger over a finished request.
+#[test]
+fn the_hint_is_not_repeated() {
+    let mut app = typed("add auth to");
+    app.completion_hinted = true;
+    press_complete(&mut app);
+    deliver(
+        &mut app,
+        complete::Completion {
+            prefix: "add auth to".into(),
+            tail: Ok(" login".into()),
+        },
+    );
+    assert!(app.status_bar.flash_text().is_none());
+}
+
+fn deliver(app: &mut App, completion: complete::Completion) {
+    let (tx, rx) = flume::bounded(1);
+    tx.send(completion).unwrap();
+    app.completion_rx = Some(rx);
+    app.poll_completion();
+}
+
+// ---------------------------------------------------------------------------
+// Activity line
+// ---------------------------------------------------------------------------
+
+fn started_turn() -> App {
+    let mut app = test_app();
+    app.submit_or_queue(QueuedMessage {
+        text: "do the thing".into(),
+        images: Vec::new(),
+    });
+    app
+}
+
+#[test]
+fn a_turn_starts_the_activity_clock() {
+    let app = started_turn();
+    assert_eq!(app.status, Status::Streaming);
+    let activity = app.activity.expect("a running turn has an activity");
+    assert_eq!(activity.output_tokens, 0);
+}
+
+/// Providers report usage once per model reply, so this is where the count can
+/// honestly move.
+#[test]
+fn each_model_reply_adds_to_the_turn_count() {
+    let mut app = started_turn();
+    let usage = TokenUsage {
+        output: 40,
+        ..Default::default()
+    };
+    app.update(agent_msg(turn_complete(usage, "test", None)));
+    assert_eq!(app.activity.unwrap().output_tokens, 40);
+
+    app.update(agent_msg(turn_complete(usage, "test", None)));
+    assert_eq!(app.activity.unwrap().output_tokens, 80);
+}
+
+#[test]
+fn the_count_belongs_to_the_turn_not_the_session() {
+    let mut app = started_turn();
+    let usage = TokenUsage {
+        output: 40,
+        ..Default::default()
+    };
+    app.update(agent_msg(turn_complete(usage, "test", None)));
+    app.update(done_event());
+
+    app.submit_or_queue(QueuedMessage {
+        text: "again".into(),
+        images: Vec::new(),
+    });
+    assert_eq!(app.activity.unwrap().output_tokens, 0);
+}
+
+#[test_case(true  ; "finished")]
+#[test_case(false ; "cancelled")]
+fn the_clock_stops_when_the_turn_does(finished: bool) {
+    let mut app = started_turn();
+    if finished {
+        app.update(done_event());
+    } else {
+        app.handle_cancel();
+    }
+    assert!(app.activity.is_none());
 }

@@ -228,7 +228,8 @@ pub fn run(
                 }
             }
             AgentEvent::ThinkingDelta { .. } => {}
-            AgentEvent::ToolPending { .. }
+            AgentEvent::MailboxMessage { .. }
+            | AgentEvent::ToolPending { .. }
             | AgentEvent::ToolStart(_)
             | AgentEvent::ToolOutput { .. }
             | AgentEvent::ToolDone(_)

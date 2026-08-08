@@ -397,11 +397,32 @@ pub enum SessionRequest {
     List,
     Live,
     Current,
-    New { prompt: Option<String>, focus: bool },
-    Prompt { id: Option<String>, text: String },
-    Focus { id: String },
-    Delete { id: String },
-    SetTitle { id: String, title: String },
+    New {
+        prompt: Option<String>,
+        focus: bool,
+        /// A concrete spec, or a tier name resolved through the model roles.
+        model: Option<String>,
+    },
+    Prompt {
+        id: Option<String>,
+        text: String,
+    },
+    Notify {
+        id: String,
+        text: String,
+        from: Option<String>,
+        wake: bool,
+    },
+    Focus {
+        id: String,
+    },
+    Delete {
+        id: String,
+    },
+    SetTitle {
+        id: String,
+        title: String,
+    },
 }
 
 pub type SessionReply = Result<serde_json::Value, String>;

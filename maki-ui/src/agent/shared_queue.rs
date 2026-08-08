@@ -134,11 +134,6 @@ impl QueueSender {
         lock(&self.items).len()
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     pub(crate) fn clear(&self) {
         lock(&self.items).clear();
     }

@@ -210,6 +210,21 @@ pub struct Message {
     pub kind: MessageKind,
 }
 
+const FROM_OPEN: &str = "<from agent=\"";
+const FROM_CLOSE: &str = "</from>";
+
+/// The `<` is removed rather than escaped: no legitimate message needs the
+/// delimiter, and leaving a recognisable form invites a reader to treat it as
+/// markup anyway.
+fn declaw(text: &str) -> String {
+    text.replace("</from", "/from").replace("<from", "from")
+}
+
+fn attributed(from: &str, text: &str) -> String {
+    let from = from.replace(['"', '\n', '\r'], " ");
+    format!("{FROM_OPEN}{from}\">\n{}\n{FROM_CLOSE}", declaw(text))
+}
+
 impl Message {
     /// Something the host saw, reported to the model without pretending
     /// the user said it.
@@ -220,6 +235,37 @@ impl Message {
             kind: MessageKind::Observation,
             ..Default::default()
         }
+    }
+
+    /// Attribution has to live in the content: the wire type is role plus
+    /// content only, so `kind` never reaches the model and cannot carry a
+    /// sender. The host writes the wrapper from a name it was told out of
+    /// band, and `display_text` keeps the plain body so the markup is never
+    /// shown to the user.
+    ///
+    /// Residual limit worth knowing: a message can still *claim* in prose to
+    /// be from someone else. What it cannot do is produce a second well-formed
+    /// block, because the delimiter is stripped from the body — so the
+    /// outermost wrapper is always the one the host wrote.
+    pub fn observation_from(from: Option<&str>, text: String) -> Self {
+        let Some(from) = from else {
+            return Self::observation(text);
+        };
+        Self {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: attributed(from, &text),
+            }],
+            display_text: Some(text),
+            kind: MessageKind::Observation,
+        }
+    }
+
+    /// The sender the host wrapped this in, if any.
+    pub fn observation_sender(&self) -> Option<&str> {
+        let rest = self.first_text_content()?.strip_prefix(FROM_OPEN)?;
+        let end = rest.find('"')?;
+        Some(&rest[..end])
     }
 
     pub fn is_observation(&self) -> bool {
@@ -315,6 +361,11 @@ pub enum ProviderEvent {
     ThinkingDelta {
         text: String,
     },
+    /// Which upstream a broker picked for this request. Reported once, and only
+    /// by providers that front other providers.
+    Upstream {
+        name: String,
+    },
     ToolUseStart {
         id: String,
         name: String,
@@ -374,6 +425,7 @@ const THINKING_USAGE: &str =
 /// never told us its output window. 32k matches common frontier thinking
 /// caps. Explicit user budgets never go through this.
 const FALLBACK_MAX_THINKING_BUDGET: u32 = 32_768;
+const THINKING_OFF_LABEL: &str = "thinking off";
 
 /// First Claude version that speaks adaptive thinking. Opus got there a
 /// generation early, at 4.7; the other families joined at 5.
@@ -602,9 +654,22 @@ impl ThinkingConfig {
             .map_err(|_| THINKING_USAGE)
     }
 
-    pub fn status_label(self) -> Option<Cow<'static, str>> {
-        match self {
-            Self::Off => None,
+    /// Names the level actually going out, so the bar stops advertising an
+    /// effort the model was never asked for. Falls back to the raw setting for
+    /// providers that think in budgets and have no level to show.
+    pub fn status_label(self, model: &Model) -> Option<Cow<'static, str>> {
+        if let Some(effort) = resolved_effort(model, self) {
+            return Some(Cow::Owned(format!("thinking: {effort}")));
+        }
+        match effective_thinking(model, self) {
+            // A pin outranked by a global off is state you cannot see anywhere
+            // else from here, and it survives restarts. Name it instead of
+            // leaving someone to wonder why pinning did nothing.
+            Self::Off => model
+                .supports_thinking()
+                .then(|| per_model_effort(model))
+                .flatten()
+                .map(|pinned| Cow::Owned(format!("{THINKING_OFF_LABEL}, {pinned} pinned"))),
             Self::Adaptive => Some(Cow::Borrowed("thinking")),
             Self::Effort(e) => Some(Cow::Owned(format!("thinking: {e}"))),
             Self::Budget(n) => Some(Cow::Owned(format!("thinking: {n}"))),
@@ -653,19 +718,54 @@ pub struct RequestOptions {
 }
 
 impl RequestOptions {
-    /// Strips options the model does not support. Called once before every
-    /// request so UI state, restored sessions, and subagent flags all go
-    /// through the same gate.
+    /// Strips options the model does not support, and lets a per-model effort
+    /// win over the session-wide one. Called once before every request so UI
+    /// state, restored sessions, and subagent flags all go through the same
+    /// gate, which is why the override only has to be applied here.
     pub fn clamped(self, model: &crate::model::Model) -> Self {
         Self {
-            thinking: if model.supports_thinking() {
-                self.thinking
-            } else {
-                ThinkingConfig::Off
-            },
+            thinking: effective_thinking(model, self.thinking),
             fast: self.fast && model.supports_fast(),
         }
     }
+}
+
+fn per_model_effort(model: &Model) -> Option<Effort> {
+    crate::model_registry::model_registry()
+        .read()
+        .unwrap()
+        .effort_for(&model.spec())
+}
+
+/// What the session actually gets. A per-model pick beats the session setting,
+/// but a global off stays off: these picks persist across restarts, and one
+/// forgotten level silently spending tokens after someone typed `/thinking off`
+/// is the kind of surprise that costs money.
+fn effective_thinking(model: &Model, thinking: ThinkingConfig) -> ThinkingConfig {
+    if !model.supports_thinking() || matches!(thinking, ThinkingConfig::Off) {
+        return ThinkingConfig::Off;
+    }
+    per_model_effort(model).map_or(thinking, ThinkingConfig::Effort)
+}
+
+/// The level that will actually go out for this model, which is not always the
+/// one that was asked for: a per-model pick wins, `Adaptive` resolves to the
+/// model's own default, and anything above what the model accepts snaps down.
+/// The status bar shows this so it stops promising an effort we never send.
+pub fn resolved_effort(model: &Model, thinking: ThinkingConfig) -> Option<Effort> {
+    let options = crate::model_registry::effort_options(&model.provider, &model.id)?;
+    let level = match effective_thinking(model, thinking) {
+        ThinkingConfig::Off => return None,
+        ThinkingConfig::Adaptive => options.default?,
+        ThinkingConfig::Effort(e) => e,
+        ThinkingConfig::Budget(n) => Effort::from_budget(
+            n,
+            model
+                .max_thinking_budget()
+                .unwrap_or(FALLBACK_MAX_THINKING_BUDGET),
+        ),
+    };
+    Some(level.snap(&options.supported))
 }
 
 #[derive(Debug)]
@@ -998,6 +1098,94 @@ mod tests {
             fast: false,
         };
         assert_eq!(opts.clamped(&model).thinking, expected);
+    }
+
+    /// The effort registry is global, so two tests sharing a model id race:
+    /// one's cleanup clears the other's pin mid-assertion. Every case gets its
+    /// own id instead of a shared const.
+    fn probe_model(id: &str) -> crate::model::Model {
+        let mut model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        model.id = id.into();
+        model
+    }
+
+    fn with_stored_effort<T>(
+        model: &crate::model::Model,
+        effort: Effort,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let spec = model.spec();
+        crate::model_registry::model_registry()
+            .write()
+            .unwrap()
+            .set_effort(spec.clone(), effort);
+        let out = f();
+        crate::model_registry::model_registry()
+            .write()
+            .unwrap()
+            .unset_effort(&spec);
+        out
+    }
+
+    #[test_case("pin-vs-adaptive", ThinkingConfig::Adaptive,     ThinkingConfig::Effort(Low) ; "beats_adaptive")]
+    #[test_case("pin-vs-effort",   ThinkingConfig::Effort(High), ThinkingConfig::Effort(Low) ; "beats_explicit_effort")]
+    #[test_case("pin-vs-budget",   ThinkingConfig::Budget(8192), ThinkingConfig::Effort(Low) ; "beats_budget")]
+    // A stored level must never resurrect thinking after an explicit off: these
+    // persist across restarts and would quietly spend tokens forever.
+    #[test_case("pin-vs-off",      ThinkingConfig::Off,          ThinkingConfig::Off         ; "never_overrides_off")]
+    fn clamped_prefers_per_model_effort(
+        probe_id: &str,
+        session: ThinkingConfig,
+        expected: ThinkingConfig,
+    ) {
+        let model = probe_model(probe_id);
+        let opts = RequestOptions {
+            thinking: session,
+            fast: false,
+        };
+        let got = with_stored_effort(&model, Low, || opts.clamped(&model).thinking);
+        assert_eq!(got, expected);
+    }
+
+    /// A pin the session has switched off is invisible everywhere else in the
+    /// main view, so the bar has to be the one to mention it.
+    #[test]
+    fn status_label_names_a_pin_that_off_is_suppressing() {
+        let model = probe_model("status-label-pinned");
+        let label = with_stored_effort(&model, Low, || {
+            ThinkingConfig::Off
+                .status_label(&model)
+                .map(|c| c.to_string())
+        });
+        assert_eq!(label.as_deref(), Some("thinking off, low pinned"));
+    }
+
+    #[test]
+    fn status_label_stays_quiet_when_off_with_no_pin() {
+        let model = probe_model("status-label-unpinned");
+        assert_eq!(ThinkingConfig::Off.status_label(&model), None);
+    }
+
+    /// Naming a pin on a model that cannot reason at all would just be noise.
+    #[test]
+    fn status_label_ignores_a_pin_when_the_model_cannot_think() {
+        let mut model = probe_model("status-label-cannot-think");
+        model.supports_thinking_override = Some(false);
+
+        let label = with_stored_effort(&model, Low, || ThinkingConfig::Off.status_label(&model));
+        assert_eq!(label, None);
+    }
+
+    #[test]
+    fn clamped_still_forces_off_when_model_cannot_think() {
+        let mut model = probe_model("clamped-cannot-think");
+        model.supports_thinking_override = Some(false);
+        let opts = RequestOptions {
+            thinking: ThinkingConfig::Adaptive,
+            fast: false,
+        };
+        let got = with_stored_effort(&model, Low, || opts.clamped(&model).thinking);
+        assert_eq!(got, ThinkingConfig::Off);
     }
 
     #[test]

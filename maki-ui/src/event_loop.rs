@@ -19,7 +19,9 @@ use crossterm::event::{
 };
 use maki_agent::command::CustomCommand;
 use maki_agent::permissions::PermissionManager;
-use maki_agent::{AgentConfig, CancelToken, McpCommand, McpConfigErrors, McpHandle, mcp};
+use maki_agent::{
+    AgentConfig, CancelToken, McpCommand, McpConfigErrors, McpHandle, SessionMailbox, mcp,
+};
 use maki_config::UiConfig;
 use maki_lua::{
     EventHandle, HintReader, KeymapReader, LuaCommandReader, SessionReply, SessionRequest, UiAction,
@@ -54,6 +56,17 @@ const DRAIN_BUDGET: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
 const NOT_LIVE_ERR: &str = "session not live";
+const NO_SUGGEST_MODEL: &str = "no model assigned to the suggest role (pick one in /model)";
+const SUGGEST_UNAVAILABLE: &str = "suggest model unavailable";
+const UNKNOWN_MODEL_ERR: &str = "unknown model or tier";
+const NO_TIER_MODEL_ERR: &str = "no model assigned to this role";
+/// How a message landed. `woken` and `injected` need a live runtime here;
+/// `delivered` is what a message gets when nothing is going to read it until
+/// the recipient runs again, which is also the only honest answer outside the
+/// TUI. Must match the fallback word in `maki-lua/src/api/session.rs`.
+const WOKEN: &str = "woken";
+const INJECTED: &str = "injected";
+const DELIVERED: &str = "delivered";
 
 /// Tabs carry their in-memory sessions so `/reload` reopens them without a
 /// disk round-trip; `session_has_content` tells which ones were saved.
@@ -108,6 +121,20 @@ impl SessionStatus {
             Self::NeedsInput => "needs_input",
             Self::Idle => "idle",
         }
+    }
+}
+
+/// What to tell the sender. `injected` is only for a session with a run in
+/// flight, where the message joins its next model call. An idle session that
+/// was not woken gets `delivered`: nothing will read it until it runs again,
+/// and calling that `injected` would overstate it.
+fn delivery_outcome(status: SessionStatus, woke: bool) -> &'static str {
+    if woke {
+        WOKEN
+    } else if status == SessionStatus::Idle {
+        DELIVERED
+    } else {
+        INJECTED
     }
 }
 
@@ -532,6 +559,9 @@ impl<'t> EventLoop<'t> {
             rt.app.tick_error_expiry();
             rt.app.poll_image_paste();
             rt.app.btw_modal.poll();
+            rt.app.poll_suggestions();
+            rt.app.poll_rewrite();
+            rt.app.poll_completion();
             rt.app.status_bar.poll_branch_update();
             rt.app.mcp_picker.refresh();
         }
@@ -741,11 +771,21 @@ impl<'t> EventLoop<'t> {
             SessionRequest::Current => {
                 let _ = reply_tx.send(Ok(json!(self.sessions[self.focused].id())));
             }
-            SessionRequest::New { prompt, focus } => {
+            SessionRequest::New {
+                prompt,
+                focus,
+                model,
+            } => {
+                let spec = match self.resolve_spawn_spec(model) {
+                    Ok(spec) => spec,
+                    Err(e) => {
+                        let _ = reply_tx.send(Err(e));
+                        return;
+                    }
+                };
                 let session = {
-                    let slot = self.ctx.model_slot.load();
                     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                    AppSession::new(&slot.model.spec(), &cwd.to_string_lossy())
+                    AppSession::new(&spec, &cwd.to_string_lossy())
                 };
                 let idx = self.push_runtime(self.ctx.spawn_runtime(session));
                 let id = self.sessions[idx].id();
@@ -756,6 +796,39 @@ impl<'t> EventLoop<'t> {
                     self.focused = idx;
                 }
                 let _ = reply_tx.send(Ok(json!(id)));
+            }
+            SessionRequest::Notify {
+                id,
+                text,
+                from,
+                wake,
+            } => {
+                let reply = (|| {
+                    let session_id = parse_session_id(&id)?;
+                    // Liveness is the mailbox's to answer, not the runtime
+                    // list's. A session can hold a registered mailbox without
+                    // being one of ours — headless agents do — and `notify`
+                    // has always accepted those.
+                    SessionMailbox::notify(session_id, text, from.as_deref(), wake)
+                        .map_err(|e| e.to_string())?;
+                    let Some(idx) = self.position(session_id) else {
+                        return Ok(json!(DELIVERED));
+                    };
+                    // Claiming here is safe: `start_mailbox_runs` runs later in
+                    // this same frame and finds the flag already cleared. The
+                    // hazard is the mirror image — claiming and then failing to
+                    // dispatch would drop the messages on the floor.
+                    let status = SessionStatus::of(&self.sessions[idx].app);
+                    let claimed =
+                        claim_idle_wake(status, || self.sessions[idx].handles.claim_mailbox_wake());
+                    let Some(preamble) = claimed else {
+                        return Ok(json!(delivery_outcome(status, false)));
+                    };
+                    let actions = self.sessions[idx].app.start_mailbox_run(preamble);
+                    self.dispatch(idx, actions);
+                    Ok(json!(delivery_outcome(status, true)))
+                })();
+                let _ = reply_tx.send(reply);
             }
             SessionRequest::Prompt { id, text } => {
                 let idx = match id {
@@ -805,6 +878,26 @@ impl<'t> EventLoop<'t> {
             SubmitOutcome::Queued => Ok(json!("queued")),
             SubmitOutcome::Rejected(e) => Err(e.into()),
         }
+    }
+
+    /// A new session inherits the current model unless told otherwise, which
+    /// is the expensive default for a teammate: a reviewer does not need what
+    /// the lead is running. Tier names are accepted because that is how the
+    /// rest of maki names a model by intent rather than by version.
+    fn resolve_spawn_spec(&self, model: Option<String>) -> Result<String, String> {
+        let Some(model) = model else {
+            return Ok(self.ctx.model_slot.load().model.spec());
+        };
+        if let Ok(tier) = model.parse::<maki_providers::ModelTier>() {
+            return maki_providers::model_registry::model_registry()
+                .read()
+                .unwrap()
+                .spec_for_tier_any(tier)
+                .ok_or_else(|| format!("{NO_TIER_MODEL_ERR}: {model}"));
+        }
+        Model::from_spec(&model)
+            .map(|_| model.clone())
+            .map_err(|_| format!("{UNKNOWN_MODEL_ERR}: {model}"))
     }
 
     fn position(&self, id: MakiId) -> Option<usize> {
@@ -1010,6 +1103,16 @@ impl<'t> EventLoop<'t> {
             Action::UnassignTier(spec, tier) => {
                 maki_providers::model_registry::unset_and_persist(&spec, tier, &self.ctx.storage);
             }
+            Action::SetEffort(spec, effort) => {
+                maki_providers::model_registry::set_effort_and_persist(
+                    spec,
+                    effort,
+                    &self.ctx.storage,
+                );
+            }
+            Action::ClearEffort(spec) => {
+                maki_providers::model_registry::unset_effort_and_persist(&spec, &self.ctx.storage);
+            }
             Action::Compact => {
                 let rt = &mut self.sessions[idx];
                 let run_id = rt.app.run_id;
@@ -1059,6 +1162,83 @@ impl<'t> EventLoop<'t> {
                     Arc::clone(&slot.provider),
                     slot.model.clone(),
                 );
+            }
+            Action::Suggest => {
+                // Deliberately no fallback to the current model, unlike
+                // compaction: an unpinned suggest role means the feature is
+                // off, not that the expensive model should draft prompts.
+                if let Some(spec) = maki_providers::model_registry::model_registry()
+                    .read()
+                    .unwrap()
+                    .spec_for_tier_any(maki_providers::ModelTier::Suggest)
+                    && let Ok(mut model) = Model::from_spec(&spec)
+                    && let Ok(provider) =
+                        maki_providers::provider::from_model(&mut model, self.ctx.timeouts)
+                {
+                    self.sessions[idx]
+                        .app
+                        .start_suggestions(Arc::from(provider), model);
+                }
+            }
+            Action::Complete(prefix) => {
+                // Reported rather than swallowed, unlike suggestions: the user
+                // pressed a key, so a key that silently does nothing would be
+                // indistinguishable from one that is broken.
+                let spec = maki_providers::model_registry::model_registry()
+                    .read()
+                    .unwrap()
+                    .spec_for_tier_any(maki_providers::ModelTier::Suggest);
+                let app = &mut self.sessions[idx].app;
+                match spec {
+                    None => app.fail_completion(NO_SUGGEST_MODEL.to_string()),
+                    Some(spec) => match Model::from_spec(&spec) {
+                        Err(e) => app.fail_completion(format!("{SUGGEST_UNAVAILABLE}: {e}")),
+                        Ok(mut model) => {
+                            match maki_providers::provider::from_model(
+                                &mut model,
+                                self.ctx.timeouts,
+                            ) {
+                                Err(e) => {
+                                    app.fail_completion(format!("{SUGGEST_UNAVAILABLE}: {e}"))
+                                }
+                                Ok(provider) => {
+                                    app.start_completion(Arc::from(provider), model, prefix)
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+            Action::RewritePrompt { draft, instruction } => {
+                // Same role and same reasoning as suggestions: no suggest model
+                // pinned means the feature is off, not that the expensive model
+                // should be spent rewording a prompt. Unlike suggestions this
+                // says so, because the user asked and is watching a spinner.
+                let spec = maki_providers::model_registry::model_registry()
+                    .read()
+                    .unwrap()
+                    .spec_for_tier_any(maki_providers::ModelTier::Suggest);
+                let app = &mut self.sessions[idx].app;
+                match spec {
+                    None => app.fail_rewrite(NO_SUGGEST_MODEL.to_string()),
+                    Some(spec) => match Model::from_spec(&spec) {
+                        Err(e) => app.fail_rewrite(format!("{SUGGEST_UNAVAILABLE}: {e}")),
+                        Ok(mut model) => {
+                            match maki_providers::provider::from_model(
+                                &mut model,
+                                self.ctx.timeouts,
+                            ) {
+                                Err(e) => app.fail_rewrite(format!("{SUGGEST_UNAVAILABLE}: {e}")),
+                                Ok(provider) => app.start_rewrite(
+                                    Arc::from(provider),
+                                    model,
+                                    draft,
+                                    instruction,
+                                ),
+                            }
+                        }
+                    },
+                }
             }
             Action::Suspend => {
                 let _pause = self.input.pause();
@@ -1204,6 +1384,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+    use test_case::test_case;
 
     const OBSERVATION: &str = "failed";
     const SHELL_RESULT: &str = "command finished";
@@ -1235,11 +1416,39 @@ mod tests {
         }
     }
 
+    /// A typo must not quietly spawn a teammate on the lead's expensive model:
+    /// the whole point of the parameter is choosing a cheaper one.
+    #[test]
+    fn an_unknown_model_is_refused_rather_than_defaulted() {
+        assert!(
+            "not-a-real-model"
+                .parse::<maki_providers::ModelTier>()
+                .is_err()
+        );
+        assert!(Model::from_spec("not-a-real-model").is_err());
+    }
+
+    #[test_case("weak" ; "weak")]
+    #[test_case("medium" ; "medium")]
+    #[test_case("strong" ; "strong")]
+    #[test_case("compaction" ; "compaction")]
+    fn tier_names_resolve_as_tiers_not_specs(name: &str) {
+        assert!(name.parse::<maki_providers::ModelTier>().is_ok());
+    }
+
+    #[test_case(SessionStatus::Idle,       true,  WOKEN     ; "idle_and_woken")]
+    #[test_case(SessionStatus::Idle,       false, DELIVERED ; "idle_but_quiet")]
+    #[test_case(SessionStatus::Working,    false, INJECTED  ; "working")]
+    #[test_case(SessionStatus::NeedsInput, false, INJECTED  ; "parked_on_a_prompt")]
+    fn the_outcome_says_only_what_is_true(status: SessionStatus, woke: bool, expected: &str) {
+        assert_eq!(delivery_outcome(status, woke), expected);
+    }
+
     #[test]
     fn wake_arriving_while_working_runs_when_idle() {
         let id = maki_storage::id::MakiId::generate();
         let mailbox = maki_agent::SessionMailbox::register(id);
-        maki_agent::SessionMailbox::notify(id, OBSERVATION.into(), true).unwrap();
+        maki_agent::SessionMailbox::notify(id, OBSERVATION.into(), None, true).unwrap();
 
         assert!(claim_idle_wake(SessionStatus::Working, || mailbox.claim_wake()).is_none());
         let preamble = claim_idle_wake(SessionStatus::Idle, || mailbox.claim_wake()).unwrap();

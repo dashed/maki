@@ -57,6 +57,18 @@ pub fn assistant_style() -> RoleStyle {
     }
 }
 
+/// Deliberately not `you>`: the text came from another session or a plugin,
+/// and the prefix is the only thing distinguishing the two on screen.
+pub fn peer_style() -> RoleStyle {
+    RoleStyle {
+        prefix: "peer> ",
+        text_style: theme::current().tool_dim,
+        prefix_style: theme::current().status_notice,
+        use_markdown: false,
+        max_line_bytes: None,
+    }
+}
+
 pub fn user_style() -> RoleStyle {
     RoleStyle {
         prefix: "you> ",

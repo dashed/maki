@@ -29,6 +29,7 @@ use crate::providers::openrouter::OpenRouter;
 use crate::providers::synthetic::Synthetic;
 use crate::providers::tensorx::TensorX;
 use crate::providers::zai::Zai;
+use crate::types::{EffortDialect, dialect};
 use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter)]
@@ -154,6 +155,24 @@ impl ProviderKind {
             Self::Synthetic => ModelFamily::Synthetic,
             Self::TensorX => ModelFamily::Generic,
             Self::Opencode => ModelFamily::Generic,
+        }
+    }
+
+    /// The effort levels this provider accepts, before any per-model detail.
+    /// `None` where thinking is steered by a token budget instead, so there is
+    /// no level to offer: Google, and the local endpoints that just forward a
+    /// budget field. Anthropic answers for its adaptive models; legacy Claude
+    /// ids fall back to budgets inside `apply_to_body`.
+    pub const fn effort_dialect(self) -> Option<EffortDialect<'static>> {
+        match self {
+            Self::Anthropic => Some(dialect::ANTHROPIC_ADAPTIVE),
+            Self::OpenAi | Self::Synthetic => Some(dialect::STANDARD),
+            Self::Copilot | Self::Opencode | Self::OpenRouter => Some(dialect::PREFER_HIGH),
+            Self::Mistral => Some(dialect::HIGH_ONLY),
+            Self::Zai => Some(dialect::GLM),
+            Self::DeepSeek => Some(dialect::DEEPSEEK),
+            Self::TensorX => Some(dialect::TENSORX),
+            Self::Google | Self::Ollama | Self::LlamaCpp => None,
         }
     }
 

@@ -1783,3 +1783,19 @@ fn stream_reset_clears_thinking_expand_state() {
         "new stream must stay hidden; got: {text}"
     );
 }
+
+/// A peer message is text another session chose. It reaches the transcript, so
+/// an escape sequence in it would reach the terminal.
+#[test]
+fn a_peer_bubble_does_not_emit_control_bytes() {
+    let mut panel = MessagesPanel::new(UiConfig::default(), EventHandle::disconnected_for_test());
+    panel.push(DisplayMessage::new(
+        DisplayRole::Peer,
+        "hello\x1b]52;c;cGF5bG9hZA==\x07 there".into(),
+    ));
+    let terminal = render(&mut panel, 60, 10);
+    let buf = terminal.backend().buffer();
+    let painted: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(!painted.contains('\u{1b}'), "ESC reached the buffer");
+    assert!(!painted.contains('\u{7}'), "BEL reached the buffer");
+}
