@@ -315,6 +315,11 @@ pub enum ProviderEvent {
     ThinkingDelta {
         text: String,
     },
+    /// Which upstream a broker picked for this request. Reported once, and only
+    /// by providers that front other providers.
+    Upstream {
+        name: String,
+    },
     ToolUseStart {
         id: String,
         name: String,

@@ -25,6 +25,7 @@ const MODEL_COL_MIN: usize = 16;
 const NUM_COL: usize = 7;
 const COL_GAP: usize = 2;
 const NO_USAGE_ENDPOINT: &str = "no usage endpoint for this provider";
+const UPSTREAM_INDENT: &str = "  ";
 const HOUR: i64 = 3600;
 const DAY: i64 = 24 * HOUR;
 const WEEK: i64 = 7 * DAY;
@@ -213,7 +214,10 @@ fn speed_lines(theme: &crate::theme::Theme, fg: ratatui::style::Style) -> Vec<Li
     }
     let slug_w = stats
         .keys()
-        .map(|s| UnicodeWidthStr::width(s.as_str()))
+        .map(|s| match maki_providers::stats::split_upstream(s) {
+            Some((_, upstream)) => UnicodeWidthStr::width(upstream) + UPSTREAM_INDENT.len(),
+            None => UnicodeWidthStr::width(s.as_str()),
+        })
         .max()
         .unwrap_or(0)
         .max(MODEL_COL_MIN);
@@ -236,8 +240,14 @@ fn speed_lines(theme: &crate::theme::Theme, fg: ratatui::style::Style) -> Vec<Li
 
     for (slug, s) in &stats {
         let cell = |v: Option<String>| v.unwrap_or_else(|| "-".into());
+        // Upstreams sit under the broker that chose them, so `openrouter` stays
+        // comparable to other providers while its rows say who was actually fast.
+        let label = match maki_providers::stats::split_upstream(slug) {
+            Some((_, upstream)) => format!("{UPSTREAM_INDENT}{upstream}"),
+            None => slug.clone(),
+        };
         lines.push(Line::from(vec![
-            Span::styled(format!("{PREFIX}{slug:<slug_w$}"), fg),
+            Span::styled(format!("{PREFIX}{label:<slug_w$}"), fg),
             Span::styled(
                 format!("{:>NUM_COL$}", cell(s.mean_ttft_millis().map(millis))),
                 fg,

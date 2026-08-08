@@ -17,10 +17,9 @@ use crate::{AgentError, AgentEvent, EventSender};
 async fn forward_provider_events(
     prx: flume::Receiver<ProviderEvent>,
     event_tx: &EventSender,
-    slug: &str,
-    started: Instant,
-) -> Option<Instant> {
+) -> (Option<Instant>, Option<String>) {
     let mut first_token = None;
+    let mut upstream = None;
     while let Ok(pe) = prx.recv_async().await {
         // Progress events say the request was accepted, not that the model
         // started answering, so they must not count as the first token.
@@ -31,9 +30,13 @@ async fn forward_provider_events(
             )
         {
             first_token = Some(Instant::now());
-            stats::record_first_token(slug, started.elapsed());
         }
         let ae = match pe {
+            // Bookkeeping, not something the user asked to see.
+            ProviderEvent::Upstream { name } => {
+                upstream = Some(name);
+                continue;
+            }
             ProviderEvent::TextDelta { text } => AgentEvent::TextDelta { text },
             ProviderEvent::ThinkingDelta { text } => AgentEvent::ThinkingDelta { text },
             ProviderEvent::ToolUseStart { id, name } => AgentEvent::ToolPending { id, name },
@@ -51,7 +54,7 @@ async fn forward_provider_events(
             break;
         }
     }
-    first_token
+    (first_token, upstream)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -76,8 +79,7 @@ pub(crate) async fn stream_with_retry(
         let (ptx, prx) = flume::unbounded();
         let forwarder = smol::spawn({
             let event_tx = event_tx.clone();
-            let slug = Arc::clone(&slug);
-            async move { forward_provider_events(prx, &event_tx, &slug, started).await }
+            async move { forward_provider_events(prx, &event_tx).await }
         });
         let result = futures_lite::future::race(
             provider.stream_message(model, messages, system, tools, &ptx, opts, session_id),
@@ -88,11 +90,22 @@ pub(crate) async fn stream_with_retry(
         )
         .await;
         drop(ptx);
-        let first_token = forwarder.await;
+        let (first_token, upstream) = forwarder.await;
+        // Both the broker and the upstream it chose, so `openrouter` stays
+        // comparable to other providers while the upstream rows say which of
+        // them was actually fast.
+        let keys: Vec<String> = std::iter::once(slug.to_string())
+            .chain(upstream.map(|u| stats::upstream_key(&slug, &u)))
+            .collect();
         match result {
             Ok(r) => {
                 let stream = first_token.map_or(Duration::ZERO, |t| t.elapsed());
-                stats::record_success(&slug, r.usage.output, stream);
+                for key in &keys {
+                    if let Some(t) = first_token {
+                        stats::record_first_token(key, t.duration_since(started));
+                    }
+                    stats::record_success(key, r.usage.output, stream);
+                }
                 return Ok(r);
             }
             // A cancel is the user changing their mind, not the provider failing.
@@ -126,7 +139,9 @@ pub(crate) async fn stream_with_retry(
                 }
             }
             Err(e) => {
-                stats::record_error(&slug);
+                for key in &keys {
+                    stats::record_error(key);
+                }
                 return Err(e);
             }
         }

@@ -15,6 +15,8 @@ use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{KeyPool, ResolvedAuth};
 
 const REFERER: &str = "https://maki.sh";
+const METADATA_HEADER: &str = "X-OpenRouter-Metadata";
+const METADATA_ENABLED: &str = "enabled";
 const APP_TITLE: &str = "maki";
 const PER_MILLION: f64 = 1_000_000.0;
 
@@ -235,7 +237,13 @@ impl Provider for OpenRouter {
                 body["session_id"] = json!(sid.to_string());
             }
 
-            let extra_headers = [("HTTP-Referer", REFERER), ("X-OpenRouter-Title", APP_TITLE)];
+            // Without this opt-in the response never says which upstream served
+            // the request, so per-upstream speed would have nothing to key on.
+            let extra_headers = [
+                ("HTTP-Referer", REFERER),
+                ("X-OpenRouter-Title", APP_TITLE),
+                (METADATA_HEADER, METADATA_ENABLED),
+            ];
             self.compat
                 .do_stream(model, &extra_headers, &body, event_tx, &auth)
                 .await

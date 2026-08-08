@@ -14,6 +14,7 @@ use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 const MILLIS_PER_SEC: f64 = 1000.0;
+const UPSTREAM_SEP: char = '/';
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderStats {
@@ -81,6 +82,16 @@ pub fn record_error(slug: &str) {
 
 pub fn snapshot() -> BTreeMap<String, ProviderStats> {
     store().read().unwrap().clone()
+}
+
+/// Upstreams are recorded under `broker/upstream`. Provider slugs never contain
+/// a slash, so the separator is enough to tell the two apart when rendering.
+pub fn upstream_key(slug: &str, upstream: &str) -> String {
+    format!("{slug}{UPSTREAM_SEP}{upstream}")
+}
+
+pub fn split_upstream(key: &str) -> Option<(&str, &str)> {
+    key.split_once(UPSTREAM_SEP)
 }
 
 #[cfg(test)]
