@@ -308,9 +308,35 @@ and maki currently has one and a half:
 | idle | wake it — a real turn |
 | idle, plan mode | append and persist, no wake |
 
-maki's `claim_idle_wake` fires only when status is exactly `Idle`, so a busy
-teammate cannot be told anything until its turn *ends*. Not interrupting is
-right; waiting for turn end rather than the next step boundary is a limitation.
+maki's `claim_idle_wake` fires only when status is exactly `Idle`, so the wake
+path alone cannot reach a busy teammate until its turn *ends*. Not interrupting
+is right; waiting for turn end rather than the next step boundary is a
+limitation.
+
+**But maki already has the step-boundary hook, and the mailbox just misses it.**
+`Agent::turn` polls for queued work mid-turn at `run.rs:355`:
+
+```rust
+if self.try_auto_compact().await? || self.handle_queued_command().await? {
+    return Ok(TurnOutcome::Continue);
+}
+```
+
+`handle_queued_command` calls `push_input_context`, which drains the mailbox
+(`run.rs:224-233`). So mailbox messages *are* injected at a step boundary — but
+only when a queued **user** command arrives at the same time, because the handler
+returns early unless `interrupt_source.poll()` yields one:
+
+```rust
+let Some(cmd) = source.poll() else { return Ok(false); };
+```
+
+A peer message alone never reaches it and waits for the next `Agent::run`. So
+this is not a missing mechanism, it is an unwired one: checking the mailbox
+alongside the interrupt source at that call site moves peer delivery from
+turn-end to step-boundary. Note the asymmetry to preserve while doing it — a
+queued user message is wrapped in `<user-interrupt>` and told to be addressed
+now; a peer aside should not borrow that framing.
 
 **Return a delivery outcome, not a boolean.** `injected | woken | revived |
 failed` is returned to the sending model and rendered with distinct colours. It
