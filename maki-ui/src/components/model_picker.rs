@@ -37,7 +37,17 @@ const HELP_WIDTH_PERCENT: u16 = 72;
 const HELP_MAX_HEIGHT_PERCENT: u16 = 80;
 const DETAIL_SEP: &str = " · ";
 const EFFORT_KEY: char = 'e';
-const HELP_KEY: char = '?';
+const MENU_KEY: char = 'a';
+/// Terminals disagree on what ctrl with these produces, so accept either. Both
+/// are chorded because the search box owns every bare printable character.
+const HELP_KEYS: [char; 2] = ['/', '?'];
+const MENU_TITLE: &str = " Model actions ";
+const MENU_MAX_VISIBLE: u16 = 12;
+const ROLE_SECTION_LABEL: &str = "Role";
+const EFFORT_SECTION_LABEL: &str = "Effort";
+const ASSIGNED_DETAIL: &str = "assigned, press to remove";
+const CURRENT_EFFORT_DETAIL: &str = "current, press to clear";
+const INHERIT_EFFORT_LABEL: &str = "follow /thinking";
 
 /// `(heading, key, description)`. Roles and effort answer different questions
 /// and the footer alone never said which was which, so spell it out here.
@@ -87,6 +97,12 @@ const HELP_ROWS: &[(&str, &str, &str)] = &[
         "",
         "OpenRouter publishes these per model; others use a provider default.",
     ),
+    (
+        "Menu",
+        "ctrl+a",
+        "Same choices as a list, showing what is already set, for when a",
+    ),
+    ("", "", "shortcut is not to hand."),
     ("Pick", "Enter", "Use this model for the session."),
 ];
 
@@ -107,7 +123,9 @@ fn footer_line() -> Line<'static> {
         Span::styled(" suggest", t.tool_dim),
         Span::styled("  ctrl+e", t.keybind_key),
         Span::styled(" effort", t.tool_dim),
-        Span::styled("  ?", t.keybind_key),
+        Span::styled("  ctrl+a", t.keybind_key),
+        Span::styled(" menu", t.tool_dim),
+        Span::styled("  ctrl+/", t.keybind_key),
         Span::styled(" help", t.tool_dim),
     ])
 }
@@ -198,8 +216,103 @@ impl PickerItem for ModelEntry {
     }
 }
 
+/// One row of the actions menu. Toggling is expressed here rather than at the
+/// key layer so the row can say what pressing it will do.
+#[derive(Clone)]
+enum RowAction {
+    Tier(ModelTier),
+    Effort(Effort),
+    ClearEffort,
+}
+
+#[derive(Clone)]
+struct ActionEntry {
+    label: String,
+    detail: String,
+    section: String,
+    action: RowAction,
+    active: bool,
+}
+
+impl PickerItem for ActionEntry {
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn detail(&self) -> Option<&str> {
+        (!self.detail.is_empty()).then_some(self.detail.as_str())
+    }
+
+    fn section(&self) -> Option<&str> {
+        Some(&self.section)
+    }
+
+    fn is_highlighted(&self) -> bool {
+        self.active
+    }
+}
+
+fn menu_footer() -> Line<'static> {
+    let t = theme::current();
+    Line::from(vec![
+        Span::styled("  Enter", t.keybind_key),
+        Span::styled(" apply", t.tool_dim),
+    ])
+}
+
+/// Every role, plus every effort level this model actually supports. Rows say
+/// which are already on, so the menu doubles as a readout of current state.
+fn menu_entries(entry: &ModelEntry) -> Vec<ActionEntry> {
+    let mut rows: Vec<ActionEntry> = ROLE_TIERS
+        .iter()
+        .map(|&tier| {
+            let active = entry.override_tiers.contains(&tier);
+            ActionEntry {
+                label: tier.to_string(),
+                detail: if active {
+                    ASSIGNED_DETAIL.into()
+                } else {
+                    String::new()
+                },
+                section: ROLE_SECTION_LABEL.to_string(),
+                action: RowAction::Tier(tier),
+                active,
+            }
+        })
+        .collect();
+
+    if entry.supported_efforts.is_empty() {
+        return rows;
+    }
+    rows.push(ActionEntry {
+        label: INHERIT_EFFORT_LABEL.to_string(),
+        detail: String::new(),
+        section: EFFORT_SECTION_LABEL.to_string(),
+        action: RowAction::ClearEffort,
+        active: entry.effort.is_none(),
+    });
+    rows.extend(entry.supported_efforts.iter().map(|&level| {
+        let active = entry.effort == Some(level);
+        ActionEntry {
+            label: level.to_string(),
+            detail: if active {
+                CURRENT_EFFORT_DETAIL.into()
+            } else {
+                String::new()
+            },
+            section: EFFORT_SECTION_LABEL.to_string(),
+            action: RowAction::Effort(level),
+            active,
+        }
+    }));
+    rows
+}
+
 pub struct ModelPicker {
     picker: ListPicker<ModelEntry>,
+    /// Open over the model list, for the model highlighted when it opened.
+    menu: ListPicker<ActionEntry>,
+    menu_spec: String,
     models: Arc<ArcSwapOption<Vec<String>>>,
     recents: Vec<String>,
     current_spec: String,
@@ -212,6 +325,10 @@ impl ModelPicker {
     pub fn new(models: Arc<ArcSwapOption<Vec<String>>>) -> Self {
         Self {
             picker: ListPicker::new().with_footer_builder(footer_line),
+            menu: ListPicker::new()
+                .with_max_visible(MENU_MAX_VISIBLE)
+                .with_footer_builder(menu_footer),
+            menu_spec: String::new(),
             models,
             recents: Vec::new(),
             current_spec: String::new(),
@@ -284,6 +401,7 @@ impl ModelPicker {
 
     pub fn close(&mut self) {
         self.show_help = false;
+        self.menu.close();
         self.picker.close();
     }
 
@@ -305,8 +423,23 @@ impl ModelPicker {
             self.show_help = false;
             return ModelPickerAction::Consumed;
         }
-        if key.code == KeyCode::Char(HELP_KEY) && !key.modifiers.contains(KeyModifiers::CONTROL) {
+        if self.menu.is_open() {
+            return self.handle_menu_key(key);
+        }
+        if let KeyCode::Char(c) = key.code
+            && HELP_KEYS.contains(&c)
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
             self.show_help = true;
+            return ModelPickerAction::Consumed;
+        }
+        if key.code == KeyCode::Char(MENU_KEY)
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(entry) = self.picker.selected_item()
+            && !entry.spec.is_empty()
+        {
+            self.menu_spec = entry.spec.clone();
+            self.menu.open(menu_entries(entry), MENU_TITLE);
             return ModelPickerAction::Consumed;
         }
         // Ctrl-chorded: the picker's search box takes every bare printable
@@ -346,9 +479,39 @@ impl ModelPicker {
         }
     }
 
+    /// Rows carry what pressing them does, so this only has to translate.
+    fn handle_menu_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        match self.menu.handle_key(key) {
+            PickerAction::Consumed => ModelPickerAction::Consumed,
+            PickerAction::Close => {
+                self.menu.close();
+                ModelPickerAction::Consumed
+            }
+            PickerAction::Toggle(..) => ModelPickerAction::Consumed,
+            PickerAction::Select(row) => {
+                let spec = std::mem::take(&mut self.menu_spec);
+                self.menu.close();
+                self.dirty = true;
+                match row.action {
+                    RowAction::Tier(tier) if row.active => {
+                        ModelPickerAction::UnassignTier(spec, tier)
+                    }
+                    RowAction::Tier(tier) => ModelPickerAction::AssignTier(spec, tier),
+                    // Choosing the level already in force means turning it off.
+                    RowAction::Effort(_) if row.active => ModelPickerAction::ClearEffort(spec),
+                    RowAction::Effort(level) => ModelPickerAction::SetEffort(spec, level),
+                    RowAction::ClearEffort => ModelPickerAction::ClearEffort(spec),
+                }
+            }
+        }
+    }
+
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         self.try_refresh();
         let picker_area = self.picker.view(frame, area);
+        if self.menu.is_open() {
+            return self.menu.view(frame, area);
+        }
         if self.show_help {
             self.view_help(frame, area);
         }
@@ -630,6 +793,96 @@ mod tests {
             p.picker.visible_len() < before,
             "typing '{letter}' must filter the list, not be swallowed"
         );
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn open_menu_on_a_model() -> ModelPicker {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        p.picker.select_item_by(|e| !e.is_role);
+        p.handle_key(ctrl(MENU_KEY));
+        assert!(p.menu.is_open(), "ctrl+a should open the menu");
+        p
+    }
+
+    /// The menu has to offer everything the chords do, or it is not an
+    /// alternative to knowing them.
+    #[test]
+    fn menu_lists_every_role() {
+        let entry = parse_model_entry("anthropic/claude-sonnet-4-20250514").unwrap();
+        let rows = menu_entries(&entry);
+        for tier in ROLE_TIERS {
+            assert!(
+                rows.iter()
+                    .any(|r| matches!(r.action, RowAction::Tier(t) if t == tier)),
+                "menu missing role {tier}"
+            );
+        }
+    }
+
+    /// A model with no effort levels should show roles only, not an empty
+    /// section implying there is something to pick.
+    #[test]
+    fn menu_omits_effort_when_the_model_has_none() {
+        let mut entry = parse_model_entry("anthropic/claude-sonnet-4-20250514").unwrap();
+        entry.supported_efforts.clear();
+        let rows = menu_entries(&entry);
+        assert!(rows.iter().all(|r| r.section == ROLE_SECTION_LABEL));
+    }
+
+    /// Picking the role a model already holds is how you take it away.
+    #[test]
+    fn choosing_an_assigned_role_removes_it() {
+        let mut entry = parse_model_entry("zai/glm-5").unwrap();
+        entry.override_tiers = vec![ModelTier::Strong];
+        let rows = menu_entries(&entry);
+        let strong = rows
+            .iter()
+            .find(|r| matches!(r.action, RowAction::Tier(ModelTier::Strong)))
+            .expect("strong row");
+        assert!(strong.active);
+        assert_eq!(strong.detail, ASSIGNED_DETAIL);
+    }
+
+    #[test]
+    fn menu_takes_the_keyboard_while_open() {
+        let mut p = open_menu_on_a_model();
+        // Enter applies a menu row rather than selecting a model.
+        let action = p.handle_key(key(KeyCode::Enter));
+        assert!(
+            !matches!(action, ModelPickerAction::Select(_)),
+            "Enter in the menu must not switch model"
+        );
+        assert!(!p.menu.is_open(), "applying should close the menu");
+    }
+
+    #[test]
+    fn esc_leaves_the_menu_without_leaving_the_picker() {
+        let mut p = open_menu_on_a_model();
+        p.handle_key(key(KeyCode::Esc));
+        assert!(!p.menu.is_open());
+        assert!(p.is_open(), "the model list should still be up");
+    }
+
+    #[test_case('/' ; "slash")]
+    #[test_case('?' ; "question_mark")]
+    fn ctrl_opens_help(c: char) {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        p.handle_key(ctrl(c));
+        assert!(p.show_help);
+    }
+
+    /// `?` used to open help unchorded, which took it out of the search box.
+    #[test]
+    fn a_bare_question_mark_reaches_the_search_box() {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        p.handle_key(key(KeyCode::Char('?')));
+        assert!(!p.show_help, "bare ? must not open help");
     }
 
     #[test]
