@@ -196,7 +196,7 @@ impl<'h> Agent<'h> {
             prompt: _,
         } = input;
         self.rollback_len = self.history.len();
-        self.push_input_context(preamble);
+        self.push_input_context(preamble)?;
         if !message.trim().is_empty() || !images.is_empty() {
             self.history
                 .push(Message::user_with_images(message.clone(), images));
@@ -221,11 +221,30 @@ impl<'h> Agent<'h> {
         result
     }
 
-    fn push_input_context(&mut self, preamble: Vec<Message>) {
+    fn push_input_context(&mut self, preamble: Vec<Message>) -> Result<(), AgentError> {
         for message in preamble {
+            // The idle-wake path claims the mailbox in the UI and hands the
+            // messages back here as preamble, so they never pass through
+            // `drain_mailbox` and have to be announced from here too.
+            self.announce_mailbox_message(&message)?;
             self.history.push(message);
         }
-        self.drain_mailbox();
+        self.drain_mailbox()
+    }
+
+    /// An observation is hidden from the transcript, so without this a message
+    /// from elsewhere lands in the model's context with nothing on screen.
+    fn announce_mailbox_message(&self, message: &Message) -> Result<(), AgentError> {
+        if !message.is_observation() {
+            return Ok(());
+        }
+        let Some(text) = message.user_text() else {
+            return Ok(());
+        };
+        self.event_tx.send(AgentEvent::MailboxMessage {
+            text: text.to_string(),
+        })?;
+        Ok(())
     }
 
     /// Mailbox messages join the history before every model call, not only at
@@ -239,12 +258,15 @@ impl<'h> Agent<'h> {
     ///
     /// Draining also clears the wake flag, which is what stops the UI starting
     /// a second turn for a message the model has already read.
-    fn drain_mailbox(&mut self) {
-        if let Some(mailbox) = &self.mailbox {
-            for message in mailbox.drain() {
-                self.history.push(message);
-            }
+    fn drain_mailbox(&mut self) -> Result<(), AgentError> {
+        let Some(mailbox) = &self.mailbox else {
+            return Ok(());
+        };
+        for message in mailbox.drain() {
+            self.announce_mailbox_message(&message)?;
+            self.history.push(message);
         }
+        Ok(())
     }
 
     async fn run_loop(&mut self) -> Result<(), AgentError> {
@@ -288,7 +310,7 @@ impl<'h> Agent<'h> {
         // the whole turn. Deliberately not a `Continue`: an empty mailbox must
         // not extend a turn that was ending, and a turn about to end costs
         // nothing to wait for anyway, since going idle wakes the session.
-        self.drain_mailbox();
+        self.drain_mailbox()?;
         let tools = self.request_tools();
         let response = match stream_with_retry(
             &*self.provider,
@@ -531,7 +553,7 @@ impl<'h> Agent<'h> {
                     text: input.message.clone(),
                     image_count: input.images.len(),
                 })?;
-                self.push_input_context(std::mem::take(&mut input.preamble));
+                self.push_input_context(std::mem::take(&mut input.preamble))?;
                 self.mode = input.mode.clone();
                 let display = input.message.clone();
                 let wrapped = format!(
@@ -777,6 +799,54 @@ mod tests {
                 [Some("response"), Some("peer says hello"), Some("response")]
             );
             assert!(history.as_slice()[1].is_observation());
+        });
+    }
+
+    /// The transcript hides observations, so the event is the only way the
+    /// arrival reaches the screen.
+    #[test]
+    fn a_delivered_message_is_announced() {
+        smol::block_on(async {
+            let id = maki_storage::id::MakiId::generate();
+            let mailbox = SessionMailbox::register(id);
+            SessionMailbox::notify(id, "peer says hello".into(), true).unwrap();
+            let mut history = History::new(Vec::new());
+            let (mut agent, event_rx) = make_agent(
+                MockProvider::new(vec![text_response(StopReason::EndTurn)]),
+                &mut history,
+            );
+            agent.mailbox = Some(mailbox);
+
+            agent.turn().await.unwrap();
+            drop(agent);
+
+            let announced = event_rx.try_iter().any(|e| {
+                matches!(e.event, AgentEvent::MailboxMessage { ref text } if text == "peer says hello")
+            });
+            assert!(announced, "expected a MailboxMessage event");
+        });
+    }
+
+    /// The idle-wake path claims the mailbox in the UI and hands the messages
+    /// back as preamble, so they never pass through `drain_mailbox`.
+    #[test]
+    fn a_message_arriving_as_preamble_is_announced_too() {
+        smol::block_on(async {
+            let mut history = History::new(Vec::new());
+            let (mut agent, event_rx) = make_agent(
+                MockProvider::new(vec![text_response(StopReason::EndTurn)]),
+                &mut history,
+            );
+            let mut input = default_input();
+            input.preamble = vec![Message::observation("woken by a peer".into())];
+
+            agent.run(input).await.unwrap();
+            drop(agent);
+
+            let announced = event_rx.try_iter().any(|e| {
+                matches!(e.event, AgentEvent::MailboxMessage { ref text } if text == "woken by a peer")
+            });
+            assert!(announced, "expected a MailboxMessage event");
         });
     }
 

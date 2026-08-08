@@ -931,6 +931,7 @@ impl EventPump {
             | AgentEvent::ToolOutput { .. }
             | AgentEvent::ToolDone(_)
             | AgentEvent::QueueItemConsumed { .. }
+            | AgentEvent::MailboxMessage { .. }
             | AgentEvent::AutoCompacting
             | AgentEvent::CompactionDone
             | AgentEvent::AuthRequired
