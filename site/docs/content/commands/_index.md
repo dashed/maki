@@ -28,6 +28,7 @@ Type `/` in the input box to open the command palette.
 | `/yolo` | Toggle YOLO mode (skip all permission prompts) |
 | `/thinking` | Toggle extended thinking (off, adaptive, effort level, or budget) |
 | `/effort` | Set reasoning effort for the current model, from the levels it supports |
+| `/provider` | Route OpenRouter to preferred upstreams (price/throughput/latency, or clear) |
 | `/fast` | Toggle Anthropic fast mode (Opus only) |
 | `/workflow` | Toggle workflow mode (task callable inside code_execution) |
 | `/exit` | Exit the application |

@@ -155,6 +155,83 @@ pub struct ProviderDef {
     pub enable_free_models: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelDef>,
+    /// OpenRouter picks an upstream for you unless told otherwise. Only
+    /// meaningful for providers that broker other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingConfig>,
+}
+
+/// What to ask the broker for when several upstreams serve the same model.
+/// Mirrors OpenRouter's `provider` request field, minus the knobs that mostly
+/// exist to shoot yourself with (explicit order, fallback disabling).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<RoutingSort>,
+    /// Upstreams to skip entirely.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
+    /// When non-empty, the only upstreams allowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_collection: Option<DataCollection>,
+}
+
+impl RoutingConfig {
+    pub fn is_empty(&self) -> bool {
+        self.sort.is_none()
+            && self.ignore.is_empty()
+            && self.only.is_empty()
+            && self.data_collection.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingSort {
+    Price,
+    Throughput,
+    Latency,
+}
+
+impl RoutingSort {
+    pub const ALL: [Self; 3] = [Self::Price, Self::Throughput, Self::Latency];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Price => "price",
+            Self::Throughput => "throughput",
+            Self::Latency => "latency",
+        }
+    }
+}
+
+impl FromStr for RoutingSort {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|v| v.as_str() == s)
+            .ok_or_else(|| format!("unknown sort: {s}"))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DataCollection {
+    Allow,
+    Deny,
+}
+
+impl DataCollection {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

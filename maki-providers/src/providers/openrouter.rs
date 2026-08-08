@@ -208,6 +208,10 @@ impl Provider for OpenRouter {
 
             body["cache_control"] = json!({"type": "ephemeral"});
 
+            if let Some(routing) = crate::routing::resolve(CONFIG.slug) {
+                body["provider"] = crate::routing::to_body_value(&routing);
+            }
+
             let reasoning_info: Option<Arc<OpenRouterModelInfo>> = {
                 let guard = crate::model_registry::model_registry().read().unwrap();
                 // Discovery keys by the builtin slug; a dynamic wrap's model

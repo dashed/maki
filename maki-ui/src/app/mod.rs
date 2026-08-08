@@ -59,8 +59,9 @@ use maki_agent::{
     SharedMessages, SubagentInfo,
 };
 use maki_config::UiConfig;
+use maki_config::providers::{RoutingConfig, RoutingSort};
 use maki_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
-use maki_providers::{Effort, Model, ThinkingConfig, add_cost, model_registry};
+use maki_providers::{Effort, Model, ThinkingConfig, add_cost, model_registry, routing};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
 use maki_storage::model::persist_model;
@@ -93,6 +94,10 @@ const EFFORT_BUDGET_ONLY_MSG: &str =
     "This provider sets thinking by token budget, use /thinking <tokens>";
 const EFFORT_CLEARED_MSG: &str = "Effort cleared, following /thinking again";
 const EFFORT_CLEAR_ARGS: [&str; 3] = ["clear", "reset", "auto"];
+const ROUTING_CLEARED_MSG: &str = "Provider routing cleared, following providers.toml again";
+const ROUTING_CLEAR_ARGS: [&str; 3] = ["clear", "reset", "auto"];
+const ROUTING_USAGE_MSG: &str =
+    "Usage: /provider price|throughput|latency|clear. Lists live in providers.toml";
 const FAST_ON_MSG: &str = "Fast mode: on";
 const FAST_OFF_MSG: &str = "Fast mode: off";
 const WORKFLOW_ON_MSG: &str = "Workflow mode: on";
@@ -1276,6 +1281,38 @@ impl App {
         }
     }
 
+    /// Sets only the sort, because that is the knob worth changing mid-session.
+    /// Ignore and only lists are long and belong in `providers.toml`, and this
+    /// override deliberately replaces the file's routing wholesale so what you
+    /// asked for is what gets sent.
+    fn set_routing(&mut self, arg: &str) {
+        if arg.is_empty() {
+            let current = routing::session_override()
+                .and_then(|r| r.sort)
+                .map_or_else(
+                    || ROUTING_USAGE_MSG.to_string(),
+                    |s| format!("Provider sort: {}", s.as_str()),
+                );
+            self.flash(current);
+            return;
+        }
+        if ROUTING_CLEAR_ARGS.contains(&arg) {
+            routing::set_session_override(None);
+            self.flash(ROUTING_CLEARED_MSG.into());
+            return;
+        }
+        match arg.parse::<RoutingSort>() {
+            Ok(sort) => {
+                routing::set_session_override(Some(RoutingConfig {
+                    sort: Some(sort),
+                    ..Default::default()
+                }));
+                self.flash(format!("Provider sort: {}", sort.as_str()));
+            }
+            Err(_) => self.flash(ROUTING_USAGE_MSG.into()),
+        }
+    }
+
     fn execute_command(&mut self, cmd: ParsedCommand) -> Vec<Action> {
         self.input_box.discard();
         match cmd.name.as_str() {
@@ -1368,6 +1405,10 @@ impl App {
             }
             "/effort" => {
                 self.set_effort(&cmd.args.trim().to_lowercase());
+                vec![]
+            }
+            "/provider" => {
+                self.set_routing(&cmd.args.trim().to_lowercase());
                 vec![]
             }
             "/fast" => {

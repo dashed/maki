@@ -195,6 +195,35 @@ supports_vision = false
 | `discover_models` | bool | When true, also probe the provider's model list endpoint (default false) |
 | `enable_free_models` | bool | Opencode only. Show free catalog models (default false) |
 | `models` | array | Declared models for custom providers (see below) |
+| `routing` | table | OpenRouter only. Which upstream to prefer (see below) |
+
+### Provider routing
+
+OpenRouter brokers the same model across many upstreams and picks one for you.
+When you care which, say so under `routing`:
+
+```toml
+[openrouter.routing]
+sort = "throughput"            # price | throughput | latency
+ignore = ["some-upstream"]     # never route here
+only = ["together", "azure"]   # when set, the only upstreams allowed
+data_collection = "deny"       # allow (default) | deny, for upstreams that train on your data
+```
+
+`sort = "throughput"` is what `:nitro` does, and `sort = "price"` what `:floor`
+does, without the model-id suffix. Prefer this: a suffixed id matches nothing in
+the model catalog, so pricing, context window and reasoning levels all silently
+fall back to defaults.
+
+Know what `sort` costs you. Left unset, OpenRouter load balances across healthy
+upstreams and skips any that saw an outage in the last 30 seconds. Setting
+`sort` turns that off and walks a fixed order instead, so chasing throughput
+also gives up the outage dodging. Set it when speed matters more than a retry,
+and leave it alone when it does not.
+
+`/provider price|throughput|latency` overrides the sort for the session, and
+`/provider clear` returns to this file. The session override replaces the file's
+routing entirely, so what you ask for is what gets sent.
 
 ### Model fields
 
