@@ -179,6 +179,38 @@ Four things worth doing anyway, in rough priority order:
 4. **A non-TUI session supervisor**, if teams should work outside the TUI. This is
    the only genuinely architectural item, and it is optional.
 
+### Decisions taken
+
+| Question | Decision |
+|---|---|
+| Delivery outcome | A new `SessionRequest::Notify` answered by the event loop, **not** a busy flag on the mailbox. `maki.session.notify` stays synchronous and untouched; a new async `maki.session.send` carries the taxonomy. |
+| Headless | TUI-only for v1 (see below). |
+| Teammate names | The plugin owns a name→id map in its module table. No host change. |
+
+**Why not a busy flag.** The obvious move is an RAII guard around `Agent::run`
+setting `busy` on the mailbox state — about twenty lines, no new global. It is
+wrong because its worst guess is the common one: `drain_mailbox` runs at the
+*top* of each turn, so between the last drain and the run returning there is a
+whole model call plus tool execution. A message arriving there would be reported
+as `injected` and then sit waiting. And `woken` would be an outright lie outside
+the TUI, where nothing consumes `claim_wake` at all. Answering from the event
+loop makes the outcome **observed rather than predicted** — deciding and acting
+happen in the same borrow, so there is no window to be wrong about.
+
+**Why not route through `SessionRequest::Prompt`.** Structurally it is the right
+shape — it already returns started/queued/rejected. Semantically it is not:
+`queued` parks text for a separate later run wrapped in `<user-interrupt>`, where
+a mailbox message rides into the next model call of the *current* run with no
+wrapper. Reusing it would change when and how the message lands, not just how it
+is reported.
+
+**Why names do not key off session titles.** `/rename` would silently break
+addressing, and enforcing global uniqueness in `set_title` would break ordinary
+session titling. The alternative considered was putting names in the `MAILBOXES`
+registry in Rust, so a headless session could be addressed by name even though
+it cannot be spawned — rejected only because teams are TUI-only for v1, which
+makes that portability moot. Revisit if that changes.
+
 ### Sender attribution, in detail
 
 `notify` pushes `Message::observation(text)`, and `MessageKind::Observation` is
@@ -209,10 +241,31 @@ something.
 
 ## Limitations to decide about, not discover
 
-**Teams would be TUI-only.** `EventLoop` exists only in the interactive UI. Under
-headless, ACP and the SDK, every `maki.session.*` call returns "no interactive UI
-attached" — except `notify`, which bypasses the loop and calls
-`SessionMailbox::notify` inline.
+**Teams are TUI-only. Decided, not merely observed.** `EventLoop` exists only in
+the interactive UI, and `notify` is the one `maki.session.*` verb that works
+anywhere, because it bypasses the loop and calls `SessionMailbox::notify` inline.
+
+The reason is not where it first appears. `maki-ui/src/agent/` — `AgentHandles`,
+`AgentLoop`, the command router, the cancel map — is already frontend-neutral,
+and *every* frontend registers a mailbox, so a headless session is a valid
+`notify` target today. What ACP, the SDK and print lack is a **container**: ACP
+holds one `Option<SessionState>` and overwrites it on install, the SDK holds a
+single handle, print is one-shot. Lifting this means adding multi-session
+semantics to protocol surfaces that do not have it — frontend-shaped work no
+refactor avoids. Rough sizing: ~300 lines for a `SessionRuntime` trait and
+registry (mostly moved, not written), ~80 for the TUI impl, ~150-250 for a
+headless one, then 200-400 per protocol surface.
+
+Worth saying in a release note: maki already ships parallel multi-agent work
+outside the TUI via the task plugin and workflow mode. The gap is not "no
+headless concurrency", it is "no headless *persistent, addressable* agents".
+
+An earlier draft of this document claimed those calls return "no interactive UI
+attached" outside the TUI. They did not — they **hung**. The runtime always
+holds a `UiAction` sender, so the send succeeded into a channel only the TUI
+drains, and the caller awaited a reply that could not come. Fixed on
+`alberto/headless-ui-hang`; recorded here because the wrong version of this
+sentence is the kind a design doc propagates.
 
 **Permissions differ from Claude Code, deliberately.** Each runtime *forks* its
 `PermissionManager` (commented "Prototype only: every runtime forks its own
