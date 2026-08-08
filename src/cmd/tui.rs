@@ -241,6 +241,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
     setup::warn_ignored_provider_fields();
 
     if cli.is_sdk_mode() {
+        stack.plugin_host.answer_ui_actions_without_ui();
         let fast = stack.config.always_fast && stack.model.supports_fast();
         let prompt_slots = stack.plugin_host.event_handle().collect_prompt_slots();
         let timeouts = stack.timeouts();
@@ -258,6 +259,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
         return Ok(());
     }
     if cli.print {
+        stack.plugin_host.answer_ui_actions_without_ui();
         let fast = stack.config.always_fast && stack.model.supports_fast();
         let timeouts = stack.timeouts();
         crate::print::run(

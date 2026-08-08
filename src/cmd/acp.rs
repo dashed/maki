@@ -20,6 +20,7 @@ pub fn run(model_arg: Option<String>, yolo: bool, no_plugins: bool, no_jit: bool
 
     let mut plugin_host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !no_jit)
         .context("initialize lua plugin host")?;
+    plugin_host.answer_ui_actions_without_ui();
 
     let raw_config = plugin_host
         .load_init_files_or_skip(no_plugins, &cwd)

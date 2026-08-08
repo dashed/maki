@@ -553,6 +553,7 @@ pub fn index(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
 
     let mut host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !no_jit)
         .context("initialize lua plugin host")?;
+    host.answer_ui_actions_without_ui();
 
     let raw_config = host
         .load_init_files_or_skip(no_plugins, &cwd)
@@ -642,6 +643,7 @@ pub fn prompt(
     let reg = ToolRegistry::global_arc();
     let mut host =
         PluginHost::with_jit(Arc::clone(reg), !no_jit).context("initialize lua plugin host")?;
+    host.answer_ui_actions_without_ui();
     let raw_config = host
         .load_init_files_or_skip(no_plugins, &cwd)
         .context("load init.lua files")?;

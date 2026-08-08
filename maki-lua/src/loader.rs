@@ -430,6 +430,58 @@ impl PluginHost {
     pub fn ui_action_rx(&self) -> flume::Receiver<UiAction> {
         self.inner.ui_action_rx.clone()
     }
+
+    /// Answer UI actions with an error, for frontends that have no event loop.
+    ///
+    /// The Lua runtime always holds a `UiAction` sender, so `maki.session.*`
+    /// sends succeed everywhere — and then park forever waiting for a reply
+    /// nobody is there to give. Without this, the documented "no interactive UI
+    /// attached" is a hang.
+    ///
+    /// Must be called by every frontend that does not run the UI event loop.
+    /// It cannot be the default, because the receiver is MPMC: a drainer left
+    /// running alongside the TUI would steal half its actions.
+    pub fn answer_ui_actions_without_ui(&self) {
+        let rx = self.inner.ui_action_rx.clone();
+        std::thread::spawn(move || answer_without_ui(&rx));
+    }
+}
+
+fn answer_without_ui(rx: &flume::Receiver<UiAction>) {
+    while let Ok(action) = rx.recv() {
+        // Only `Session` has an error to report. For the rest, dropping the
+        // reply channel is itself the answer.
+        if let UiAction::Session { reply_tx, .. } = action {
+            let _ = reply_tx.send(Err(crate::api::util::command::NO_UI_ERR.to_string()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod ui_drain_tests {
+    use super::*;
+    use crate::api::util::command::SessionRequest;
+    use std::time::Duration;
+
+    /// The bug this guards is a hang, so the timeout is the assertion: a
+    /// regression parks here rather than failing an equality check.
+    #[test]
+    fn a_session_request_without_a_ui_is_answered_rather_than_ignored() {
+        let (tx, rx) = flume::unbounded();
+        std::thread::spawn(move || answer_without_ui(&rx));
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        tx.send(UiAction::Session {
+            req: SessionRequest::Current,
+            reply_tx,
+        })
+        .unwrap();
+
+        let reply = reply_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("no reply: a plugin calling this would hang forever");
+        assert!(reply.unwrap_err().contains("no interactive UI"));
+    }
 }
 
 #[derive(Clone)]
