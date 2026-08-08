@@ -1,3 +1,4 @@
+pub(crate) mod activity;
 pub(crate) mod btw_modal;
 pub(crate) mod code_view;
 pub mod command;
@@ -16,6 +17,7 @@ pub(crate) mod model_picker;
 pub(crate) mod permission_prompt;
 pub(crate) mod plan_form;
 pub(crate) mod progress_bar;
+pub(crate) mod prompt_editor;
 pub mod queue_panel;
 pub(crate) mod rewind_picker;
 pub(crate) mod scrollbar;
@@ -23,7 +25,9 @@ pub(crate) mod search_modal;
 pub(crate) mod split_layout;
 pub mod status_bar;
 pub(crate) mod streaming_content;
+pub(crate) mod suggest_panel;
 pub(crate) mod theme_picker;
+pub(crate) mod thinking_picker;
 pub(crate) mod tool_display;
 pub(crate) mod usage_modal;
 
@@ -33,7 +37,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use maki_agent::AgentInput;
 use maki_agent::{BufferSnapshot, ToolInput, ToolOutput};
-use maki_providers::{Message, ModelTier};
+use maki_providers::{Effort, Message, ModelTier};
 use ratatui::text::{Line, Span};
 
 pub(crate) const CHEVRON: &str = "❯ ";
@@ -198,6 +202,17 @@ pub enum Action {
     },
     AssignTier(String, ModelTier),
     UnassignTier(String, ModelTier),
+    SetEffort(String, Effort),
+    ClearEffort(String),
+    /// Draft follow-up prompts for the turn that just ended.
+    Suggest,
+    /// Continue the half-typed draft carried here, for inline completion.
+    Complete(String),
+    /// Redraft the prompt held in the editor, following the user's instruction.
+    RewritePrompt {
+        draft: String,
+        instruction: String,
+    },
     RefreshModels,
     RefreshUsage,
     Compact,

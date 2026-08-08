@@ -10,13 +10,101 @@ use maki_providers::ModelTier;
 use maki_providers::dynamic;
 use maki_providers::model_registry;
 use maki_providers::provider::ProviderKind;
+use maki_providers::{Effort, model::EffortOptions};
+use ratatui::widgets::Paragraph;
 
 use crate::components::Overlay;
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
+use crate::components::modal::Modal;
 use crate::theme;
 
 const TITLE: &str = " Models ";
 const RECENT_SECTION: &str = "Recent";
+const ROLE_SECTION: &str = "Roles";
+const PINNED_DETAIL: &str = "pinned";
+const AUTO_DETAIL: &str = "auto";
+const UNSET_DETAIL: &str = "unset";
+/// Strongest first, so the list reads the way people talk about the roles.
+const ROLE_TIERS: [ModelTier; 5] = [
+    ModelTier::Strong,
+    ModelTier::Medium,
+    ModelTier::Weak,
+    ModelTier::Compaction,
+    ModelTier::Suggest,
+];
+const HELP_TITLE: &str = " Models help ";
+const HELP_WIDTH_PERCENT: u16 = 72;
+const HELP_MAX_HEIGHT_PERCENT: u16 = 80;
+const DETAIL_SEP: &str = " · ";
+const EFFORT_KEY: char = 'e';
+const MENU_KEY: char = 'a';
+/// Terminals disagree on what ctrl with these produces, so accept either. Both
+/// are chorded because the search box owns every bare printable character.
+const HELP_KEYS: [char; 2] = ['/', '?'];
+const MENU_TITLE: &str = " Model actions ";
+const MENU_MAX_VISIBLE: u16 = 12;
+const ROLE_SECTION_LABEL: &str = "Role";
+const EFFORT_SECTION_LABEL: &str = "Effort";
+const ASSIGNED_DETAIL: &str = "assigned, press to remove";
+const CURRENT_EFFORT_DETAIL: &str = "current, press to clear";
+const INHERIT_EFFORT_LABEL: &str = "follow /thinking";
+
+/// `(heading, key, description)`. Roles and effort answer different questions
+/// and the footer alone never said which was which, so spell it out here.
+const HELP_ROWS: &[(&str, &str, &str)] = &[
+    (
+        "Roles",
+        "",
+        "The rows at the top show which model holds each role right now,",
+    ),
+    (
+        "",
+        "",
+        "whether you pinned it or maki resolved it, and what it costs.",
+    ),
+    (
+        "Assign",
+        "! @ # $ %",
+        "Give the selected model a role: strong, medium, weak, compaction,",
+    ),
+    (
+        "",
+        "",
+        "suggest. The last two are side jobs, not models the agent runs on.",
+    ),
+    (
+        "",
+        "",
+        "Roles decide which model does what job. Subagents take the first",
+    ),
+    (
+        "",
+        "",
+        "model in each role. Press the same key again to unassign.",
+    ),
+    (
+        "Effort",
+        "ctrl+e",
+        "Cycle how hard this model reasons, through the levels it actually",
+    ),
+    (
+        "",
+        "",
+        "supports. Wraps around to following /thinking again.",
+    ),
+    (
+        "",
+        "",
+        "OpenRouter publishes these per model; others use a provider default.",
+    ),
+    (
+        "Menu",
+        "ctrl+a",
+        "Same choices as a list, showing what is already set, for when a",
+    ),
+    ("", "", "shortcut is not to hand."),
+    ("Pick", "Enter", "Use this model for the session."),
+];
 
 fn footer_line() -> Line<'static> {
     let t = theme::current();
@@ -31,18 +119,40 @@ fn footer_line() -> Line<'static> {
         Span::styled(" weak", t.tool_dim),
         Span::styled("  $", t.keybind_key),
         Span::styled(" compaction", t.tool_dim),
+        Span::styled("  %", t.keybind_key),
+        Span::styled(" suggest", t.tool_dim),
+        Span::styled("  ctrl+e", t.keybind_key),
+        Span::styled(" effort", t.tool_dim),
+        Span::styled("  ctrl+a", t.keybind_key),
+        Span::styled(" menu", t.tool_dim),
+        Span::styled("  ctrl+/", t.keybind_key),
+        Span::styled(" help", t.tool_dim),
     ])
+}
+
+/// Walks the model's own levels and falls off the end back to `None`, which
+/// means "follow /thinking". A stale level the model no longer lists also lands
+/// on `None` rather than sticking.
+fn next_effort(current: Option<Effort>, supported: &[Effort]) -> Option<Effort> {
+    match current {
+        None => supported.first().copied(),
+        Some(level) => {
+            let idx = supported.iter().position(|&s| s == level)?;
+            supported.get(idx + 1).copied()
+        }
+    }
 }
 
 fn tier_for_shortcut(key: KeyEvent) -> Option<ModelTier> {
     let digit = match (key.code, key.modifiers.contains(KeyModifiers::SHIFT)) {
         // Kitty protocol: Shift+digit reported with base key + SHIFT modifier
-        (KeyCode::Char(c @ '1'..='4'), true) => c,
+        (KeyCode::Char(c @ '1'..='5'), true) => c,
         // Legacy terminals: Shift+digit reported as the resulting character
         (KeyCode::Char('!' | '¡'), false) => '1', // US, ES
         (KeyCode::Char('@' | '"' | '™'), false) => '2', // US, UK/DE
         (KeyCode::Char('#' | '§' | '£'), false) => '3', // US, DE, UK
         (KeyCode::Char('$' | '€' | '¤'), false) => '4', // US, EU, Nordic
+        (KeyCode::Char('%' | '°'), false) => '5', // US, FR
         _ => return None,
     };
     match digit {
@@ -50,6 +160,7 @@ fn tier_for_shortcut(key: KeyEvent) -> Option<ModelTier> {
         '2' => Some(ModelTier::Medium),
         '3' => Some(ModelTier::Weak),
         '4' => Some(ModelTier::Compaction),
+        '5' => Some(ModelTier::Suggest),
         _ => None,
     }
 }
@@ -59,6 +170,8 @@ pub enum ModelPickerAction {
     Select(String),
     AssignTier(String, ModelTier),
     UnassignTier(String, ModelTier),
+    SetEffort(String, Effort),
+    ClearEffort(String),
     Close,
 }
 
@@ -67,8 +180,14 @@ struct ModelEntry {
     id: String,
     provider_display: String,
     suffix: Option<String>,
-    tier: String,
+    detail: String,
     override_tiers: Vec<ModelTier>,
+    effort: Option<Effort>,
+    supported_efforts: Vec<Effort>,
+    /// Role summary rows sit above the real list. They carry the spec they
+    /// resolve to so the normal keys still work on them, but they must not
+    /// steal the "current model" cursor from the model's own row.
+    is_role: bool,
 }
 
 impl PickerItem for ModelEntry {
@@ -81,7 +200,7 @@ impl PickerItem for ModelEntry {
     }
 
     fn detail(&self) -> Option<&str> {
-        Some(&self.tier)
+        Some(&self.detail)
     }
 
     fn section(&self) -> Option<&str> {
@@ -91,26 +210,131 @@ impl PickerItem for ModelEntry {
     fn is_highlighted(&self) -> bool {
         !self.override_tiers.is_empty()
     }
+
+    fn is_summary(&self) -> bool {
+        self.is_role
+    }
+}
+
+/// One row of the actions menu. Toggling is expressed here rather than at the
+/// key layer so the row can say what pressing it will do.
+#[derive(Clone)]
+enum RowAction {
+    Tier(ModelTier),
+    Effort(Effort),
+    ClearEffort,
+}
+
+#[derive(Clone)]
+struct ActionEntry {
+    label: String,
+    detail: String,
+    section: String,
+    action: RowAction,
+    active: bool,
+}
+
+impl PickerItem for ActionEntry {
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn detail(&self) -> Option<&str> {
+        (!self.detail.is_empty()).then_some(self.detail.as_str())
+    }
+
+    fn section(&self) -> Option<&str> {
+        Some(&self.section)
+    }
+
+    fn is_highlighted(&self) -> bool {
+        self.active
+    }
+}
+
+fn menu_footer() -> Line<'static> {
+    let t = theme::current();
+    Line::from(vec![
+        Span::styled("  Enter", t.keybind_key),
+        Span::styled(" apply", t.tool_dim),
+    ])
+}
+
+/// Every role, plus every effort level this model actually supports. Rows say
+/// which are already on, so the menu doubles as a readout of current state.
+fn menu_entries(entry: &ModelEntry) -> Vec<ActionEntry> {
+    let mut rows: Vec<ActionEntry> = ROLE_TIERS
+        .iter()
+        .map(|&tier| {
+            let active = entry.override_tiers.contains(&tier);
+            ActionEntry {
+                label: tier.to_string(),
+                detail: if active {
+                    ASSIGNED_DETAIL.into()
+                } else {
+                    String::new()
+                },
+                section: ROLE_SECTION_LABEL.to_string(),
+                action: RowAction::Tier(tier),
+                active,
+            }
+        })
+        .collect();
+
+    if entry.supported_efforts.is_empty() {
+        return rows;
+    }
+    rows.push(ActionEntry {
+        label: INHERIT_EFFORT_LABEL.to_string(),
+        detail: String::new(),
+        section: EFFORT_SECTION_LABEL.to_string(),
+        action: RowAction::ClearEffort,
+        active: entry.effort.is_none(),
+    });
+    rows.extend(entry.supported_efforts.iter().map(|&level| {
+        let active = entry.effort == Some(level);
+        ActionEntry {
+            label: level.to_string(),
+            detail: if active {
+                CURRENT_EFFORT_DETAIL.into()
+            } else {
+                String::new()
+            },
+            section: EFFORT_SECTION_LABEL.to_string(),
+            action: RowAction::Effort(level),
+            active,
+        }
+    }));
+    rows
 }
 
 pub struct ModelPicker {
     picker: ListPicker<ModelEntry>,
+    /// Open over the model list, for the model highlighted when it opened.
+    menu: ListPicker<ActionEntry>,
+    menu_spec: String,
     models: Arc<ArcSwapOption<Vec<String>>>,
     recents: Vec<String>,
     current_spec: String,
     last_spec_count: usize,
     dirty: bool,
+    show_help: bool,
 }
 
 impl ModelPicker {
     pub fn new(models: Arc<ArcSwapOption<Vec<String>>>) -> Self {
         Self {
             picker: ListPicker::new().with_footer_builder(footer_line),
+            menu: ListPicker::new()
+                .with_max_visible(MENU_MAX_VISIBLE)
+                .with_footer_builder(menu_footer),
+            menu_spec: String::new(),
             models,
             recents: Vec::new(),
             current_spec: String::new(),
             last_spec_count: 0,
             dirty: false,
+            show_help: false,
         }
     }
 
@@ -137,16 +361,33 @@ impl ModelPicker {
         }
         drop(guard);
         self.dirty = false;
+        // Where the user is, not where the session's model happens to be. The
+        // role rows carry the same specs as the models they point at, so the
+        // kind of row has to match too or an edit slides you up into the
+        // summary.
+        let anchor = self
+            .picker
+            .selected_item()
+            .filter(|e| !e.spec.is_empty())
+            .map(|e| (e.spec.clone(), e.is_role));
+
         let (entries, idx) = self.load_entries();
         self.picker.replace_items(entries);
-        self.picker.select(idx);
+
+        let restored = anchor.is_some_and(|(spec, was_role)| {
+            self.picker
+                .select_item_by(|e| e.spec == spec && e.is_role == was_role)
+        });
+        if !restored {
+            self.picker.select(idx);
+        }
     }
 
     fn load_entries(&mut self) -> (Vec<ModelEntry>, usize) {
         let guard = self.models.load();
         let specs = guard.as_deref();
         self.last_spec_count = specs.map_or(0, Vec::len);
-        let mut entries: Vec<ModelEntry> = Vec::new();
+        let mut entries: Vec<ModelEntry> = role_entries();
         let recent_specs = self.recents.clone();
         for spec in &recent_specs {
             if let Some(mut e) = parse_model_entry(spec) {
@@ -166,7 +407,7 @@ impl ModelPicker {
         entries.extend(full);
         let idx = entries
             .iter()
-            .position(|e| e.spec == self.current_spec)
+            .position(|e| !e.is_role && e.spec == self.current_spec)
             .unwrap_or(0);
         (entries, idx)
     }
@@ -176,6 +417,8 @@ impl ModelPicker {
     }
 
     pub fn close(&mut self) {
+        self.show_help = false;
+        self.menu.close();
         self.picker.close();
     }
 
@@ -192,8 +435,49 @@ impl ModelPicker {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        // Help swallows the next key so `?` never both opens and acts.
+        if self.show_help {
+            self.show_help = false;
+            return ModelPickerAction::Consumed;
+        }
+        if self.menu.is_open() {
+            return self.handle_menu_key(key);
+        }
+        if let KeyCode::Char(c) = key.code
+            && HELP_KEYS.contains(&c)
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.show_help = true;
+            return ModelPickerAction::Consumed;
+        }
+        if key.code == KeyCode::Char(MENU_KEY)
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(entry) = self.picker.selected_item()
+            && !entry.spec.is_empty()
+        {
+            self.menu_spec = entry.spec.clone();
+            self.menu.open(menu_entries(entry), MENU_TITLE);
+            return ModelPickerAction::Consumed;
+        }
+        // Ctrl-chorded: the picker's search box takes every bare printable
+        // character, so claiming a plain letter makes it untypeable.
+        if key.code == KeyCode::Char(EFFORT_KEY)
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(entry) = self.picker.selected_item()
+            && !entry.spec.is_empty()
+            && !entry.supported_efforts.is_empty()
+        {
+            let spec = entry.spec.clone();
+            let next = next_effort(entry.effort, &entry.supported_efforts);
+            self.dirty = true;
+            return match next {
+                Some(level) => ModelPickerAction::SetEffort(spec, level),
+                None => ModelPickerAction::ClearEffort(spec),
+            };
+        }
         if let Some(tier) = tier_for_shortcut(key)
             && let Some(entry) = self.picker.selected_item()
+            && !entry.spec.is_empty()
         {
             let spec = entry.spec.clone();
             self.dirty = true;
@@ -204,15 +488,77 @@ impl ModelPicker {
         }
         match self.picker.handle_key(key) {
             PickerAction::Consumed => ModelPickerAction::Consumed,
+            // Enter on an unset role has nothing to switch to.
+            PickerAction::Select(entry) if entry.spec.is_empty() => ModelPickerAction::Consumed,
             PickerAction::Select(entry) => ModelPickerAction::Select(entry.spec),
             PickerAction::Close => ModelPickerAction::Close,
             PickerAction::Toggle(..) => ModelPickerAction::Consumed,
         }
     }
 
+    /// Rows carry what pressing them does, so this only has to translate.
+    fn handle_menu_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        match self.menu.handle_key(key) {
+            PickerAction::Consumed => ModelPickerAction::Consumed,
+            PickerAction::Close => {
+                self.menu.close();
+                ModelPickerAction::Consumed
+            }
+            PickerAction::Toggle(..) => ModelPickerAction::Consumed,
+            PickerAction::Select(row) => {
+                let spec = std::mem::take(&mut self.menu_spec);
+                self.menu.close();
+                self.dirty = true;
+                match row.action {
+                    RowAction::Tier(tier) if row.active => {
+                        ModelPickerAction::UnassignTier(spec, tier)
+                    }
+                    RowAction::Tier(tier) => ModelPickerAction::AssignTier(spec, tier),
+                    // Choosing the level already in force means turning it off.
+                    RowAction::Effort(_) if row.active => ModelPickerAction::ClearEffort(spec),
+                    RowAction::Effort(level) => ModelPickerAction::SetEffort(spec, level),
+                    RowAction::ClearEffort => ModelPickerAction::ClearEffort(spec),
+                }
+            }
+        }
+    }
+
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         self.try_refresh();
-        self.picker.view(frame, area)
+        let picker_area = self.picker.view(frame, area);
+        if self.menu.is_open() {
+            return self.menu.view(frame, area);
+        }
+        if self.show_help {
+            self.view_help(frame, area);
+        }
+        picker_area
+    }
+
+    fn view_help(&self, frame: &mut Frame, area: Rect) {
+        let t = theme::current();
+        let key_width = HELP_ROWS
+            .iter()
+            .map(|(_, key, _)| key.len())
+            .max()
+            .unwrap_or(0);
+        let lines: Vec<Line> = HELP_ROWS
+            .iter()
+            .map(|(heading, key, desc)| {
+                Line::from(vec![
+                    Span::styled(format!("  {heading:<8}"), t.keybind_section),
+                    Span::styled(format!("{key:<key_width$}  "), t.keybind_key),
+                    Span::styled(*desc, t.keybind_desc),
+                ])
+            })
+            .collect();
+        let (_, inner) = Modal {
+            title: HELP_TITLE,
+            width_percent: HELP_WIDTH_PERCENT,
+            max_height_percent: HELP_MAX_HEIGHT_PERCENT,
+        }
+        .render(frame, area, lines.len() as u16);
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 }
 
@@ -254,20 +600,84 @@ fn parse_model_entry(spec: &str) -> Option<ModelEntry> {
     .filter(|&t| map.has_override(spec, t))
     .collect();
     let override_label = map.override_tier_label(spec);
+    let effort = map.effort_for(spec);
     drop(map);
     let tier = override_label.unwrap_or_else(|| match maki_providers::Model::from_spec(spec) {
         Ok(m) => m.tier.to_string(),
         Err(_) => String::new(),
     });
+    let supported_efforts = model_registry::effort_options(provider_str, model_id)
+        .map(|o: EffortOptions| o.supported)
+        .unwrap_or_default();
+    let detail = match effort {
+        Some(level) => format!("{tier}{DETAIL_SEP}{level}"),
+        None => tier,
+    };
     let id = model_id.to_string();
     Some(ModelEntry {
         spec: spec.to_string(),
         id,
         provider_display,
         suffix: None,
-        tier,
+        detail,
         override_tiers,
+        effort,
+        supported_efforts,
+        is_role: false,
     })
+}
+
+/// Four rows naming which model plays each role. Without these you had to hunt
+/// one highlighted row out of hundreds to learn what `!`/`@`/`#`/`$` had done.
+fn role_entries() -> Vec<ModelEntry> {
+    ROLE_TIERS
+        .iter()
+        .map(|&tier| {
+            let (resolved, pinned) = {
+                let map = model_registry::model_registry().read().unwrap();
+                let resolved = map.spec_for_tier_any(tier);
+                let pinned = resolved
+                    .as_deref()
+                    .is_some_and(|spec| map.has_override(spec, tier));
+                (resolved, pinned)
+            };
+
+            let Some(spec) = resolved else {
+                return role_row(tier, String::new(), None, UNSET_DETAIL.to_string());
+            };
+            let model_id = spec
+                .split_once('/')
+                .map_or(spec.clone(), |(_, id)| id.into());
+            let status = if pinned { PINNED_DETAIL } else { AUTO_DETAIL };
+            let detail = match price_label(&spec) {
+                Some(price) => format!("{status}{DETAIL_SEP}{price}"),
+                None => status.to_string(),
+            };
+            role_row(tier, spec, Some(model_id), detail)
+        })
+        .collect()
+}
+
+fn role_row(tier: ModelTier, spec: String, model_id: Option<String>, detail: String) -> ModelEntry {
+    ModelEntry {
+        spec,
+        id: tier.to_string(),
+        provider_display: ROLE_SECTION.to_string(),
+        suffix: model_id,
+        detail,
+        override_tiers: Vec::new(),
+        effort: None,
+        supported_efforts: Vec::new(),
+        is_role: true,
+    }
+}
+
+/// Only when the price is actually known, so an undiscovered model shows
+/// nothing rather than a confident `$0.00/$0.00`.
+fn price_label(spec: &str) -> Option<String> {
+    let pricing = maki_providers::Model::from_spec(spec).ok()?.pricing;
+    (pricing.input > 0.0 || pricing.output > 0.0)
+        .then(|| format!("${:.2}/${:.2}", pricing.input, pricing.output))
 }
 
 #[cfg(test)]
@@ -338,12 +748,256 @@ mod tests {
         let entry = parse_model_entry("anthropic/claude-sonnet-4-20250514").unwrap();
         assert_eq!(entry.id, "claude-sonnet-4-20250514");
         assert_eq!(entry.provider_display, "Anthropic");
-        assert!(!entry.tier.is_empty());
+        assert!(!entry.detail.is_empty());
     }
 
     #[test]
     fn parse_model_entry_no_slash() {
         assert!(parse_model_entry("no-slash").is_none());
+    }
+
+    #[test]
+    fn role_rows_cover_every_tier_and_lead_the_list() {
+        let entries = role_entries();
+        let labels: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["strong", "medium", "weak", "compaction", "suggest"]
+        );
+        assert!(entries.iter().all(|e| e.is_role));
+        assert!(entries.iter().all(|e| e.provider_display == ROLE_SECTION));
+    }
+
+    /// An unset role has no model behind it, so acting on it would otherwise
+    /// assign a tier to the empty spec.
+    #[test]
+    fn unset_role_row_is_inert() {
+        let row = role_row(ModelTier::Weak, String::new(), None, UNSET_DETAIL.into());
+        assert!(row.spec.is_empty());
+        assert!(row.supported_efforts.is_empty());
+        assert_eq!(row.detail, UNSET_DETAIL);
+    }
+
+    /// `op` fuzzy-matches `compaction`, so without excluding summary rows from
+    /// search a role row would surface every time someone hunted for opus.
+    #[test]
+    fn role_rows_drop_out_of_search_results() {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        p.handle_key(key(KeyCode::Char('o')));
+        p.handle_key(key(KeyCode::Char('p')));
+
+        let action = p.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(action, ModelPickerAction::Select(ref s) if s.contains("opus")),
+            "search must reach opus, not a role row",
+        );
+    }
+
+    /// A shortcut on a bare letter makes that letter untypeable in the search
+    /// box. `e` was bound to effort cycling and so no model with an e in its
+    /// name could be searched for, which is most of them.
+    #[test_case('e' ; "the_effort_key")]
+    #[test_case('s' ; "an_ordinary_letter")]
+    fn plain_letters_reach_the_search_box(letter: char) {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        let before = p.picker.visible_len();
+
+        p.handle_key(key(KeyCode::Char(letter)));
+
+        assert!(
+            p.picker.visible_len() < before,
+            "typing '{letter}' must filter the list, not be swallowed"
+        );
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn open_menu_on_a_model() -> ModelPicker {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        p.picker.select_item_by(|e| !e.is_role);
+        p.handle_key(ctrl(MENU_KEY));
+        assert!(p.menu.is_open(), "ctrl+a should open the menu");
+        p
+    }
+
+    /// The menu has to offer everything the chords do, or it is not an
+    /// alternative to knowing them.
+    #[test]
+    fn menu_lists_every_role() {
+        let entry = parse_model_entry("anthropic/claude-sonnet-4-20250514").unwrap();
+        let rows = menu_entries(&entry);
+        for tier in ROLE_TIERS {
+            assert!(
+                rows.iter()
+                    .any(|r| matches!(r.action, RowAction::Tier(t) if t == tier)),
+                "menu missing role {tier}"
+            );
+        }
+    }
+
+    /// A model with no effort levels should show roles only, not an empty
+    /// section implying there is something to pick.
+    #[test]
+    fn menu_omits_effort_when_the_model_has_none() {
+        let mut entry = parse_model_entry("anthropic/claude-sonnet-4-20250514").unwrap();
+        entry.supported_efforts.clear();
+        let rows = menu_entries(&entry);
+        assert!(rows.iter().all(|r| r.section == ROLE_SECTION_LABEL));
+    }
+
+    /// Picking the role a model already holds is how you take it away.
+    #[test]
+    fn choosing_an_assigned_role_removes_it() {
+        let mut entry = parse_model_entry("zai/glm-5").unwrap();
+        entry.override_tiers = vec![ModelTier::Strong];
+        let rows = menu_entries(&entry);
+        let strong = rows
+            .iter()
+            .find(|r| matches!(r.action, RowAction::Tier(ModelTier::Strong)))
+            .expect("strong row");
+        assert!(strong.active);
+        assert_eq!(strong.detail, ASSIGNED_DETAIL);
+    }
+
+    #[test]
+    fn menu_takes_the_keyboard_while_open() {
+        let mut p = open_menu_on_a_model();
+        // Enter applies a menu row rather than selecting a model.
+        let action = p.handle_key(key(KeyCode::Enter));
+        assert!(
+            !matches!(action, ModelPickerAction::Select(_)),
+            "Enter in the menu must not switch model"
+        );
+        assert!(!p.menu.is_open(), "applying should close the menu");
+    }
+
+    #[test]
+    fn esc_leaves_the_menu_without_leaving_the_picker() {
+        let mut p = open_menu_on_a_model();
+        p.handle_key(key(KeyCode::Esc));
+        assert!(!p.menu.is_open());
+        assert!(p.is_open(), "the model list should still be up");
+    }
+
+    #[test_case('/' ; "slash")]
+    #[test_case('?' ; "question_mark")]
+    fn ctrl_opens_help(c: char) {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        p.handle_key(ctrl(c));
+        assert!(p.show_help);
+    }
+
+    /// `?` used to open help unchorded, which took it out of the search box.
+    #[test]
+    fn a_bare_question_mark_reaches_the_search_box() {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        p.handle_key(key(KeyCode::Char('?')));
+        assert!(!p.show_help, "bare ? must not open help");
+    }
+
+    /// Editing marked the list dirty and the refresh re-selected the session's
+    /// current model, so every assign or effort cycle threw you back there.
+    #[test]
+    fn an_edit_leaves_you_on_the_row_you_were_on() {
+        let mut p = ModelPicker::new(test_models());
+        // Open with one model current, then move somewhere else.
+        p.open("anthropic/claude-sonnet-4-20250514");
+        assert!(
+            p.picker
+                .select_item_by(|e| !e.is_role && e.spec == "zai/glm-5")
+        );
+
+        p.handle_key(ctrl(EFFORT_KEY));
+        p.try_refresh();
+
+        let landed = p.picker.selected_item().expect("a row is selected");
+        assert!(!landed.is_role);
+        assert_eq!(
+            landed.spec, "zai/glm-5",
+            "an edit must not move the highlight to the current model"
+        );
+    }
+
+    /// Role rows share their spec with the model they point at, so restoring by
+    /// spec alone would slide the highlight up into the summary. Needs a role
+    /// that actually resolves, hence the override.
+    #[test]
+    fn refresh_keeps_a_role_row_a_role_row() {
+        const PINNED: &str = "zai/glm-5";
+        // Suggest, because no other test in this crate asserts on it.
+        model_registry::model_registry()
+            .write()
+            .unwrap()
+            .set(PINNED.to_string(), ModelTier::Suggest);
+
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        let found = p.picker.select_item_by(|e| e.is_role && e.spec == PINNED);
+        let landed = found.then(|| {
+            p.dirty = true;
+            p.try_refresh();
+            let row = p.picker.selected_item().expect("a row is selected");
+            (row.is_role, row.spec.clone())
+        });
+
+        model_registry::model_registry()
+            .write()
+            .unwrap()
+            .unset(PINNED, ModelTier::Suggest);
+
+        assert_eq!(
+            landed,
+            Some((true, PINNED.to_string())),
+            "a refresh must leave a role row on the role row"
+        );
+    }
+
+    /// Searching, then editing, must not also throw away the query.
+    #[test]
+    fn an_edit_keeps_the_search_query() {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        p.handle_key(key(KeyCode::Char('g')));
+        let filtered = p.picker.visible_len();
+
+        p.dirty = true;
+        p.try_refresh();
+
+        assert_eq!(p.picker.visible_len(), filtered, "query should survive");
+    }
+
+    #[test]
+    fn ctrl_e_still_cycles_effort() {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        // Land on a real model row that has effort levels to cycle.
+        p.picker
+            .select_item_by(|e| !e.is_role && !e.supported_efforts.is_empty());
+
+        let action = p.handle_key(KeyEvent::new(
+            KeyCode::Char(EFFORT_KEY),
+            KeyModifiers::CONTROL,
+        ));
+        assert!(matches!(
+            action,
+            ModelPickerAction::SetEffort(..) | ModelPickerAction::ClearEffort(..)
+        ));
+    }
+
+    #[test]
+    fn role_rows_never_steal_the_current_model_cursor() {
+        let mut p = ModelPicker::new(test_models());
+        p.open("zai/glm-5");
+        let selected = p.picker.selected_item().expect("a row is selected");
+        assert!(!selected.is_role);
+        assert_eq!(selected.spec, "zai/glm-5");
     }
 
     #[test_case(key(KeyCode::Char('!')),           ModelTier::Strong     ; "legacy_bang_strong")]
@@ -393,7 +1047,9 @@ mod tests {
         ]);
         p.open("anthropic/claude-opus-4-6-20260101");
 
-        p.picker.select(0);
+        // Role summary rows lead the list, so the first real entry is the one
+        // that matters here.
+        p.picker.select_item_by(|e| !e.is_role);
         let action = p.handle_key(key(KeyCode::Enter));
         assert!(
             matches!(action, ModelPickerAction::Select(ref s) if s == "zai/glm-5"),

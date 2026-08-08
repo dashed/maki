@@ -95,6 +95,21 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         max_args: 1,
     },
     BuiltinCommand {
+        name: "/effort",
+        description: "Set reasoning effort for the current model, from the levels it supports",
+        max_args: 1,
+    },
+    BuiltinCommand {
+        name: "/improve",
+        description: "Open the prompt editor: edit a draft, or say how to reword it",
+        max_args: usize::MAX,
+    },
+    BuiltinCommand {
+        name: "/provider",
+        description: "Route OpenRouter to preferred upstreams (price/throughput/latency, or clear)",
+        max_args: 1,
+    },
+    BuiltinCommand {
         name: "/fast",
         description: "Toggle Anthropic fast mode (Opus only)",
         max_args: 0,

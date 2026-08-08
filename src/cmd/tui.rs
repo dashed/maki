@@ -295,7 +295,13 @@ pub fn run(mut cli: Cli) -> Result<()> {
             if session.messages().is_empty() {
                 session.meta.fast |= stack.config.always_fast;
                 session.meta.workflow |= stack.config.always_workflow;
-                if let Some(thinking) = stack.config.always_thinking {
+                // Config outranks the picker, the same way `ui.theme` outranks
+                // the theme you last chose: declaring it should stick.
+                if let Some(thinking) = stack
+                    .config
+                    .always_thinking
+                    .or_else(|| maki_storage::thinking::read_default(&storage))
+                {
                     session.meta.thinking = Some(thinking);
                 }
             }

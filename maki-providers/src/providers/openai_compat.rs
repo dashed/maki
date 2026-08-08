@@ -468,6 +468,33 @@ struct SseChunk {
     #[serde(default)]
     choices: Vec<ChunkChoice>,
     usage: Option<ChunkUsage>,
+    /// Brokers say who actually served the request, and they do not agree on
+    /// where to put it. OpenRouter nests it under `openrouter_metadata` behind
+    /// an opt-in header; others hang a bare `provider` off the chunk. Read both
+    /// shapes and stay quiet when neither is there.
+    provider: Option<String>,
+    openrouter_metadata: Option<Value>,
+}
+
+impl SseChunk {
+    fn upstream(&self) -> Option<String> {
+        if let Some(name) = self.provider.as_deref().filter(|s| !s.is_empty()) {
+            return Some(name.to_string());
+        }
+        let meta = self.openrouter_metadata.as_ref()?;
+        // Either a plain name, or the entry flagged `selected` among endpoints.
+        if let Some(name) = meta.get("provider").and_then(Value::as_str) {
+            return Some(name.to_string());
+        }
+        meta.get("endpoints")?
+            .get("available")?
+            .as_array()?
+            .iter()
+            .find(|e| e.get("selected").and_then(Value::as_bool) == Some(true))
+            .and_then(|e| e.get("provider"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
 }
 
 struct ToolAccumulator {
@@ -487,6 +514,7 @@ pub async fn parse_sse(
     let mut reasoning_text = String::new();
     let mut tool_accumulators: Vec<ToolAccumulator> = Vec::new();
     let mut usage = TokenUsage::default();
+    let mut upstream: Option<String> = None;
     let mut stop_reason: Option<StopReason> = None;
     let mut is_first_content = true;
     let mut deadline = Instant::now() + stream_timeout;
@@ -515,6 +543,13 @@ pub async fn parse_sse(
                 continue;
             }
         };
+
+        if upstream.is_none()
+            && let Some(name) = chunk.upstream()
+        {
+            upstream = Some(name.clone());
+            let _ = event_tx.send_async(ProviderEvent::Upstream { name }).await;
+        }
 
         if let Some(u) = chunk.usage {
             let cached = u
@@ -697,6 +732,7 @@ pub async fn parse_sse(
 mod tests {
     use super::*;
     use futures_lite::io::Cursor;
+    use test_case::test_case;
 
     const TEST_STREAM_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -755,6 +791,34 @@ data: [DONE]\n";
         })
     }
 
+    const UPSTREAM: &str = "Together";
+
+    /// Brokers disagree on where the serving upstream goes, so read every shape
+    /// we know of rather than betting on one.
+    #[test_case(json!({"provider": UPSTREAM}) ; "bare_provider_field")]
+    #[test_case(json!({"openrouter_metadata": {"provider": UPSTREAM}}) ; "metadata_provider")]
+    #[test_case(
+        json!({"openrouter_metadata": {"endpoints": {"available": [
+            {"provider": "Other", "selected": false},
+            {"provider": UPSTREAM, "selected": true}
+        ]}}})
+        ; "metadata_selected_endpoint"
+    )]
+    fn upstream_read_from_any_known_shape(extra: Value) {
+        let mut chunk = json!({"choices": []});
+        for (k, v) in extra.as_object().expect("object") {
+            chunk[k] = v.clone();
+        }
+        let parsed: SseChunk = serde_json::from_value(chunk).expect("chunk parses");
+        assert_eq!(parsed.upstream().as_deref(), Some(UPSTREAM));
+    }
+
+    #[test]
+    fn upstream_absent_when_nothing_reports_one() {
+        let parsed: SseChunk = serde_json::from_value(json!({"choices": []})).expect("parses");
+        assert_eq!(parsed.upstream(), None);
+    }
+
     #[test]
     fn parse_sse_reasoning_and_content() {
         smol::block_on(async {
@@ -789,6 +853,7 @@ data: [DONE]\n";
                     ProviderEvent::TextDelta { text } => text_deltas.push(text),
                     ProviderEvent::ToolUseStart { .. } => {}
                     ProviderEvent::PromptProgress { .. } => {}
+                    ProviderEvent::Upstream { .. } => {}
                 }
             }
             assert_eq!(thinking, vec!["Let me think", "..."]);

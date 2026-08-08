@@ -54,6 +54,8 @@ const DRAIN_BUDGET: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
 const NOT_LIVE_ERR: &str = "session not live";
+const NO_SUGGEST_MODEL: &str = "no model assigned to the suggest role (pick one in /model)";
+const SUGGEST_UNAVAILABLE: &str = "suggest model unavailable";
 
 /// Tabs carry their in-memory sessions so `/reload` reopens them without a
 /// disk round-trip; `session_has_content` tells which ones were saved.
@@ -532,6 +534,9 @@ impl<'t> EventLoop<'t> {
             rt.app.tick_error_expiry();
             rt.app.poll_image_paste();
             rt.app.btw_modal.poll();
+            rt.app.poll_suggestions();
+            rt.app.poll_rewrite();
+            rt.app.poll_completion();
             rt.app.status_bar.poll_branch_update();
             rt.app.mcp_picker.refresh();
         }
@@ -1010,6 +1015,16 @@ impl<'t> EventLoop<'t> {
             Action::UnassignTier(spec, tier) => {
                 maki_providers::model_registry::unset_and_persist(&spec, tier, &self.ctx.storage);
             }
+            Action::SetEffort(spec, effort) => {
+                maki_providers::model_registry::set_effort_and_persist(
+                    spec,
+                    effort,
+                    &self.ctx.storage,
+                );
+            }
+            Action::ClearEffort(spec) => {
+                maki_providers::model_registry::unset_effort_and_persist(&spec, &self.ctx.storage);
+            }
             Action::Compact => {
                 let rt = &mut self.sessions[idx];
                 let run_id = rt.app.run_id;
@@ -1059,6 +1074,83 @@ impl<'t> EventLoop<'t> {
                     Arc::clone(&slot.provider),
                     slot.model.clone(),
                 );
+            }
+            Action::Suggest => {
+                // Deliberately no fallback to the current model, unlike
+                // compaction: an unpinned suggest role means the feature is
+                // off, not that the expensive model should draft prompts.
+                if let Some(spec) = maki_providers::model_registry::model_registry()
+                    .read()
+                    .unwrap()
+                    .spec_for_tier_any(maki_providers::ModelTier::Suggest)
+                    && let Ok(mut model) = Model::from_spec(&spec)
+                    && let Ok(provider) =
+                        maki_providers::provider::from_model(&mut model, self.ctx.timeouts)
+                {
+                    self.sessions[idx]
+                        .app
+                        .start_suggestions(Arc::from(provider), model);
+                }
+            }
+            Action::Complete(prefix) => {
+                // Reported rather than swallowed, unlike suggestions: the user
+                // pressed a key, so a key that silently does nothing would be
+                // indistinguishable from one that is broken.
+                let spec = maki_providers::model_registry::model_registry()
+                    .read()
+                    .unwrap()
+                    .spec_for_tier_any(maki_providers::ModelTier::Suggest);
+                let app = &mut self.sessions[idx].app;
+                match spec {
+                    None => app.fail_completion(NO_SUGGEST_MODEL.to_string()),
+                    Some(spec) => match Model::from_spec(&spec) {
+                        Err(e) => app.fail_completion(format!("{SUGGEST_UNAVAILABLE}: {e}")),
+                        Ok(mut model) => {
+                            match maki_providers::provider::from_model(
+                                &mut model,
+                                self.ctx.timeouts,
+                            ) {
+                                Err(e) => {
+                                    app.fail_completion(format!("{SUGGEST_UNAVAILABLE}: {e}"))
+                                }
+                                Ok(provider) => {
+                                    app.start_completion(Arc::from(provider), model, prefix)
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+            Action::RewritePrompt { draft, instruction } => {
+                // Same role and same reasoning as suggestions: no suggest model
+                // pinned means the feature is off, not that the expensive model
+                // should be spent rewording a prompt. Unlike suggestions this
+                // says so, because the user asked and is watching a spinner.
+                let spec = maki_providers::model_registry::model_registry()
+                    .read()
+                    .unwrap()
+                    .spec_for_tier_any(maki_providers::ModelTier::Suggest);
+                let app = &mut self.sessions[idx].app;
+                match spec {
+                    None => app.fail_rewrite(NO_SUGGEST_MODEL.to_string()),
+                    Some(spec) => match Model::from_spec(&spec) {
+                        Err(e) => app.fail_rewrite(format!("{SUGGEST_UNAVAILABLE}: {e}")),
+                        Ok(mut model) => {
+                            match maki_providers::provider::from_model(
+                                &mut model,
+                                self.ctx.timeouts,
+                            ) {
+                                Err(e) => app.fail_rewrite(format!("{SUGGEST_UNAVAILABLE}: {e}")),
+                                Ok(provider) => app.start_rewrite(
+                                    Arc::from(provider),
+                                    model,
+                                    draft,
+                                    instruction,
+                                ),
+                            }
+                        }
+                    },
+                }
             }
             Action::Suspend => {
                 let _pause = self.input.pause();

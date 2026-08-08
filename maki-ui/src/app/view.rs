@@ -6,6 +6,7 @@ use crate::components::keybindings::KeybindContext;
 use crate::components::queue_panel;
 use crate::components::split_layout::{MIN_CHAT_ROWS, SplitLayout, carve};
 use crate::components::status_bar::{StatusBarContext, UsageStats};
+use crate::components::suggest_panel;
 use crate::components::usage_modal::UsageModalContext;
 use crate::selection::{self, SelectableZone, SelectionZone, ZoneRegistry};
 use crate::theme;
@@ -22,6 +23,7 @@ struct ViewLayout {
     bottom_area: Rect,
     status_area: Rect,
     queue_area: Rect,
+    suggest_area: Rect,
     panel_windows: Vec<(usize, Rect)>,
     input_area: Rect,
     splits: SplitLayout,
@@ -79,6 +81,7 @@ impl App {
         } else if self.is_main_chat() {
             let panel_h: u16 = self.float_mgr.panel_reqs().iter().map(|(_, h)| *h).sum();
             queue_panel::height(self.queue.panel_len())
+                + suggest_panel::height(self.shown_suggestions().len())
                 + panel_h
                 + self.input_box.height(inner.width).min(max_bottom)
         } else {
@@ -103,7 +106,16 @@ impl App {
             queue_panel::height(self.queue.panel_len())
         };
 
-        let mut constraints = vec![Constraint::Length(queue_height)];
+        let suggest_height = if bottom_takeover {
+            0
+        } else {
+            suggest_panel::height(self.shown_suggestions().len())
+        };
+
+        let mut constraints = vec![
+            Constraint::Length(queue_height),
+            Constraint::Length(suggest_height),
+        ];
         for &(_, h) in &panel_reqs {
             constraints.push(Constraint::Length(h));
         }
@@ -111,10 +123,11 @@ impl App {
 
         let areas = Layout::vertical(constraints).split(bottom_area);
         let queue_area = areas[0];
+        let suggest_area = areas[1];
         let panel_windows: Vec<(usize, Rect)> = panel_reqs
             .iter()
             .enumerate()
-            .map(|(i, &(idx, _))| (idx, areas[1 + i]))
+            .map(|(i, &(idx, _))| (idx, areas[2 + i]))
             .collect();
         let input_area = areas[areas.len() - 1];
 
@@ -123,6 +136,7 @@ impl App {
             bottom_area,
             status_area,
             queue_area,
+            suggest_area,
             panel_windows,
             input_area,
             splits,
@@ -189,6 +203,7 @@ impl App {
         } else if layout.bottom_area.height > 0 {
             let queue_entries = self.queue.panel_entries();
             queue_panel::view(frame, layout.queue_area, &queue_entries, self.queue.focus());
+            suggest_panel::view(frame, layout.suggest_area, self.shown_suggestions());
             for &(idx, rect) in &layout.panel_windows {
                 self.float_mgr.view_panel(frame, idx, rect);
             }
@@ -246,9 +261,11 @@ impl App {
 
         render_if_open!(self.rewind_picker);
         render_if_open!(self.theme_picker);
+        render_if_open!(self.thinking_picker);
         render_if_open!(self.model_picker);
         render_if_open!(self.login_picker);
         render_if_open!(self.mcp_picker);
+        render_if_open!(self.prompt_editor);
 
         overlay_rect
     }
@@ -307,9 +324,11 @@ impl App {
             auto_scroll: chat.auto_scroll(),
             chat_name,
             retry_info: self.retry_info.as_ref(),
-            thinking_label: self.state.thinking.status_label(),
+            thinking_label: self.state.thinking.status_label(&self.state.model),
             fast: self.state.fast,
             workflow: self.state.workflow,
+            yolo: self.permissions.is_yolo(),
+            activity: self.activity,
             restoring: self.restoring.load(Ordering::Relaxed),
         };
         self.status_bar.view(frame, status_area, &ctx);

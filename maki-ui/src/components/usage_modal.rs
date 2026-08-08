@@ -11,6 +11,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 use crate::components::ModalScroll;
 use crate::components::keybindings::key;
@@ -24,6 +25,7 @@ const MODEL_COL_MIN: usize = 16;
 const NUM_COL: usize = 7;
 const COL_GAP: usize = 2;
 const NO_USAGE_ENDPOINT: &str = "no usage endpoint for this provider";
+const UPSTREAM_INDENT: &str = "  ";
 const HOUR: i64 = 3600;
 const DAY: i64 = 24 * HOUR;
 const WEEK: i64 = 7 * DAY;
@@ -198,7 +200,84 @@ fn build_lines(ctx: &UsageModalContext, theme: &crate::theme::Theme) -> Vec<Line
         )));
     }
 
+    lines.extend(speed_lines(theme, fg));
     lines
+}
+
+/// Time to first token is the wait you feel; tokens per second decides whether
+/// a long answer is worth asking for. Neither is derivable from token counts,
+/// which is why they get their own section rather than another column.
+fn speed_lines(theme: &crate::theme::Theme, fg: ratatui::style::Style) -> Vec<Line<'static>> {
+    let stats = maki_providers::stats::snapshot();
+    if stats.is_empty() {
+        return Vec::new();
+    }
+    let slug_w = stats
+        .keys()
+        .map(|s| match maki_providers::stats::split_upstream(s) {
+            Some((_, upstream)) => UnicodeWidthStr::width(upstream) + UPSTREAM_INDENT.len(),
+            None => UnicodeWidthStr::width(s.as_str()),
+        })
+        .max()
+        .unwrap_or(0)
+        .max(MODEL_COL_MIN);
+
+    let mut lines = vec![
+        Line::default(),
+        Line::from(Span::styled(
+            format!("{PREFIX}Per provider speed"),
+            theme.keybind_section,
+        )),
+        Line::from(vec![
+            Span::raw(PREFIX),
+            Span::styled(format!("{:<slug_w$}", "provider"), theme.status_dim),
+            Span::styled(format!("{:>NUM_COL$}", "ttft"), theme.status_dim),
+            Span::styled(format!("{:>NUM_COL$}", "best"), theme.status_dim),
+            Span::styled(format!("{:>NUM_COL$}", "tok/s"), theme.status_dim),
+            Span::styled(format!("{:>NUM_COL$}", "err"), theme.status_dim),
+        ]),
+    ];
+
+    for (slug, s) in &stats {
+        let cell = |v: Option<String>| v.unwrap_or_else(|| "-".into());
+        // Upstreams sit under the broker that chose them, so `openrouter` stays
+        // comparable to other providers while its rows say who was actually fast.
+        let label = match maki_providers::stats::split_upstream(slug) {
+            Some((_, upstream)) => format!("{UPSTREAM_INDENT}{upstream}"),
+            None => slug.clone(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{PREFIX}{label:<slug_w$}"), fg),
+            Span::styled(
+                format!("{:>NUM_COL$}", cell(s.mean_ttft_millis().map(millis))),
+                fg,
+            ),
+            Span::styled(
+                format!("{:>NUM_COL$}", cell(s.ttft_millis_best.map(millis))),
+                theme.status_dim,
+            ),
+            Span::styled(
+                format!(
+                    "{:>NUM_COL$}",
+                    cell(s.tokens_per_sec().map(|t| format!("{t:.0}")))
+                ),
+                fg,
+            ),
+            Span::styled(
+                format!("{:>NUM_COL$}", format!("{}/{}", s.errors, s.requests)),
+                theme.status_dim,
+            ),
+        ]));
+    }
+    lines
+}
+
+fn millis(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    }
 }
 
 fn totals_row(

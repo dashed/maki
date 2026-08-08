@@ -43,6 +43,12 @@ pub trait PickerItem {
     fn is_highlighted(&self) -> bool {
         false
     }
+    /// Header-ish rows that summarize rather than offer a choice. They show
+    /// while the query is empty and drop out of search, so typing `op` finds
+    /// `opus` without also dragging in a summary row named `compaction`.
+    fn is_summary(&self) -> bool {
+        false
+    }
 }
 
 impl PickerItem for String {
@@ -116,6 +122,7 @@ impl<T: PickerItem> State<T> {
                 .items
                 .iter()
                 .enumerate()
+                .filter(|(_, item)| !item.is_summary())
                 .map(|(idx, item)| (idx, item.label()))
                 .collect();
             let matches: HashSet<&str> = pattern
@@ -420,6 +427,13 @@ impl<T: PickerItem> ListPicker<T> {
     pub fn selected_item(&self) -> Option<&T> {
         let s = self.state.as_ref()?;
         s.selected_item_index().map(|i| &s.items[i])
+    }
+
+    /// How many rows survive the current search, which is how a test can tell
+    /// a keystroke reached the search box rather than being swallowed.
+    #[cfg(test)]
+    pub fn visible_len(&self) -> usize {
+        self.state.as_ref().map_or(0, |s| s.filtered.len())
     }
 
     pub fn selected_index(&self) -> Option<usize> {

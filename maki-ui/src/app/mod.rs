@@ -5,13 +5,16 @@
 //! `AgentHandles::respawn`. Everything else only reads it.
 
 mod btw;
+mod complete;
 mod image_paste;
 pub(crate) mod mode;
 mod mouse;
 mod queue;
+mod rewrite;
 mod session;
 pub(crate) mod session_state;
 pub(crate) mod shell;
+mod suggest;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod view;
@@ -26,6 +29,7 @@ use crate::AppSession;
 use crate::chat::Chat;
 use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
+use crate::components::activity::Activity;
 use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
@@ -39,11 +43,13 @@ use crate::components::mcp_picker::{McpPicker, McpPickerAction};
 use crate::components::model_picker::{ModelPicker, ModelPickerAction};
 use crate::components::permission_prompt::PermissionPrompt;
 use crate::components::plan_form::{PlanForm, PlanFormAction};
+use crate::components::prompt_editor::{PromptEditor, PromptEditorAction};
 use crate::components::rewind_picker::{RewindPicker, RewindPickerAction};
 use crate::components::scrollbar;
 use crate::components::search_modal::{SearchAction, SearchModal};
 use crate::components::status_bar::StatusBar;
 use crate::components::theme_picker::{ThemePicker, ThemePickerAction};
+use crate::components::thinking_picker::{ThinkingPicker, ThinkingPickerAction};
 use crate::components::usage_modal::{UsageFetchState, UsageModal};
 use crate::components::{
     Action, DisplayMessage, DisplayRole, ExitRequest, Overlay, RetryInfo, Status, is_ctrl,
@@ -58,8 +64,9 @@ use maki_agent::{
     SharedMessages, SubagentInfo,
 };
 use maki_config::UiConfig;
+use maki_config::providers::{RoutingConfig, RoutingSort};
 use maki_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
-use maki_providers::{Model, ThinkingConfig, add_cost};
+use maki_providers::{Effort, Model, ThinkingConfig, add_cost, model_registry, routing};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
 use maki_storage::model::persist_model;
@@ -86,6 +93,17 @@ const AUTH_EXPIRED_MSG: &str =
     "Token expired. Run `maki auth login` in another terminal, then press Enter to retry.";
 const FLASH_NO_PLAN: &str = "No plan file";
 const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
+const THINKING_UNSUPPORTED_MSG: &str = "Thinking requires a model that supports it";
+const THINKING_DEFAULT_MSG: &str = "New sessions will start with";
+const EFFORT_UNSUPPORTED_MSG: &str = "Effort requires a model that supports thinking";
+const EFFORT_BUDGET_ONLY_MSG: &str =
+    "This provider sets thinking by token budget, use /thinking <tokens>";
+const EFFORT_CLEARED_MSG: &str = "Effort cleared, following /thinking again";
+const EFFORT_CLEAR_ARGS: [&str; 3] = ["clear", "reset", "auto"];
+const ROUTING_CLEARED_MSG: &str = "Provider routing cleared, following providers.toml again";
+const ROUTING_CLEAR_ARGS: [&str; 3] = ["clear", "reset", "auto"];
+const ROUTING_USAGE_MSG: &str =
+    "Usage: /provider price|throughput|latency|clear. Lists live in providers.toml";
 const FAST_ON_MSG: &str = "Fast mode: on";
 const FAST_OFF_MSG: &str = "Fast mode: off";
 const WORKFLOW_ON_MSG: &str = "Workflow mode: on";
@@ -141,6 +159,7 @@ pub struct App {
     pub(super) task_picker: ListPicker<TaskEntry>,
     pub(super) task_picker_original: Option<usize>,
     pub(super) theme_picker: ThemePicker,
+    pub(super) thinking_picker: ThinkingPicker,
     pub(super) model_picker: ModelPicker,
     pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
@@ -158,6 +177,27 @@ pub struct App {
     pub(crate) state: session_state::SessionState,
     pub exit_request: ExitRequest,
     pub(crate) exit_on_done: bool,
+    /// Follow-up prompts for the last turn, empty when there are none. Kept
+    /// after dismissal so they can be shown again rather than regenerated,
+    /// which would cost another call for prompts we already have.
+    pub(super) suggestions: Vec<String>,
+    pub(super) suggestions_hidden: bool,
+    pub(super) suggest_rx: Option<flume::Receiver<suggest::Suggestions>>,
+    pub(crate) prompt_editor: PromptEditor,
+    pub(super) rewrite_rx: Option<flume::Receiver<rewrite::Rewrite>>,
+    /// Identifies the current editing session, so a redraft owed to a closed
+    /// one is dropped rather than landing on an unrelated draft.
+    pub(super) rewrite_seq: u64,
+    /// In-flight inline completion of the half-typed draft, if any.
+    pub(super) completion_rx: Option<flume::Receiver<complete::Completion>>,
+    pub(super) completion_hinted: bool,
+    /// Live state of the turn in progress, for the status bar. `None` between
+    /// turns, which is what makes it the single source of "is it working".
+    pub(super) activity: Option<Activity>,
+    /// `/compact` finishes by emitting a normal `Done`, which is otherwise
+    /// indistinguishable from a real turn ending. Counted so a compact does not
+    /// buy a round of suggestions nobody asked for.
+    pub(super) pending_compacts: u32,
     pub(crate) queue: MessageQueue,
     recoverable_queue: Vec<String>,
     pub answer_tx: Option<flume::Sender<String>>,
@@ -232,6 +272,7 @@ impl App {
             task_picker: ListPicker::new(),
             task_picker_original: None,
             theme_picker: ThemePicker::new(),
+            thinking_picker: ThinkingPicker::new(),
             model_picker: ModelPicker::new(available_models),
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
@@ -249,6 +290,16 @@ impl App {
             state,
             exit_request: ExitRequest::None,
             exit_on_done: false,
+            suggestions: Vec::new(),
+            suggestions_hidden: false,
+            suggest_rx: None,
+            prompt_editor: PromptEditor::new(),
+            rewrite_rx: None,
+            rewrite_seq: 0,
+            completion_rx: None,
+            completion_hinted: false,
+            activity: None,
+            pending_compacts: 0,
             queue: MessageQueue::default(),
             recoverable_queue: Vec::new(),
             answer_tx: None,
@@ -661,6 +712,37 @@ impl App {
             });
         }
 
+        if self.prompt_editor.is_open() {
+            return Some(match self.prompt_editor.handle_key(key) {
+                PromptEditorAction::Consumed | PromptEditorAction::Close => vec![],
+                PromptEditorAction::Rewrite { draft, instruction } => {
+                    vec![Action::RewritePrompt { draft, instruction }]
+                }
+                PromptEditorAction::Accept(text) => {
+                    self.input_box.set_input_at_end(text);
+                    vec![]
+                }
+            });
+        }
+
+        if self.thinking_picker.is_open() {
+            return Some(match self.thinking_picker.handle_key(key) {
+                ThinkingPickerAction::Consumed => vec![],
+                ThinkingPickerAction::Select(thinking) => {
+                    self.state.thinking = thinking;
+                    self.flash(format!("Thinking: {thinking}"));
+                    vec![]
+                }
+                ThinkingPickerAction::SetDefault(thinking) => {
+                    self.state.thinking = thinking;
+                    maki_storage::thinking::persist_default(&self.storage, thinking.into());
+                    self.flash(format!("{THINKING_DEFAULT_MSG}: {thinking}"));
+                    vec![]
+                }
+                ThinkingPickerAction::Close => vec![],
+            });
+        }
+
         if self.model_picker.is_open() {
             return Some(match self.model_picker.handle_key(key) {
                 ModelPickerAction::Consumed => vec![],
@@ -672,6 +754,12 @@ impl App {
                 }
                 ModelPickerAction::UnassignTier(spec, tier) => {
                     vec![Action::UnassignTier(spec, tier)]
+                }
+                ModelPickerAction::SetEffort(spec, effort) => {
+                    vec![Action::SetEffort(spec, effort)]
+                }
+                ModelPickerAction::ClearEffort(spec) => {
+                    vec![Action::ClearEffort(spec)]
                 }
                 ModelPickerAction::Close => vec![],
             });
@@ -731,6 +819,26 @@ impl App {
             return vec![];
         }
 
+        // Bringing them back is worth a key of its own: the prompts are already
+        // paid for, so re-showing beats generating a fresh set.
+        if key::SHOW_SUGGESTIONS.matches(key) && !self.suggestions.is_empty() {
+            self.suggestions_hidden = !self.suggestions_hidden;
+            return vec![];
+        }
+
+        if self.showing_suggestions() {
+            if let Some(prompt) = accepted_suggestion(key, &self.suggestions) {
+                self.input_box.set_input(prompt);
+                self.hide_suggestions();
+                return vec![];
+            }
+            // Anything else means the user has moved on. Hidden without
+            // consuming the key, so the keystroke still lands in the input.
+            if dismisses_suggestions(key) {
+                self.hide_suggestions();
+            }
+        }
+
         if let Some(actions) = self.handle_ctrl(key) {
             return actions;
         }
@@ -773,6 +881,13 @@ impl App {
         if key::EDIT_INPUT.matches(key) {
             return vec![Action::EditInputInEditor];
         }
+        if key::IMPROVE_PROMPT.matches(key) {
+            // Takes the draft rather than clearing it: the modal owns a copy
+            // and the input box only changes if the result is accepted.
+            let draft = self.input_box.buffer.value();
+            self.open_prompt_editor(&draft);
+            return vec![];
+        }
         if is_ctrl(&key) {
             if key::POP_QUEUE.matches(key) {
                 self.queue.remove(0);
@@ -788,6 +903,8 @@ impl App {
                 let top = self.chats[self.active_chat].scroll_top();
                 let auto = self.chats[self.active_chat].auto_scroll();
                 self.search_modal.open(top, auto);
+            } else if key::COMPLETE.matches(key) {
+                return self.request_completion();
             } else if key::FILE_PICKER.matches(key) {
                 self.file_picker.open(&self.state.session.cwd);
             } else if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
@@ -924,6 +1041,7 @@ impl App {
         self.queue.clear();
         self.recoverable_queue.clear();
         self.status = Status::Idle;
+        self.activity = None;
         vec![Action::CancelAgent {
             run_id: cancelled_run,
         }]
@@ -1074,6 +1192,11 @@ impl App {
 
         if let AgentEvent::TurnComplete(ref tc) = envelope.event {
             self.state.token_usage += tc.usage;
+            if let Some(ref mut activity) = self.activity {
+                // Per model reply, which is the only granularity providers
+                // report, so this steps rather than ticks.
+                activity.output_tokens = activity.output_tokens.saturating_add(tc.usage.output);
+            }
             add_cost(&mut self.chats[chat_idx].cost, tc.cost);
             self.state
                 .session_mut()
@@ -1133,13 +1256,20 @@ impl App {
                     self.chat_index.clear();
                     self.subagent_answers.clear();
                     self.status = Status::Idle;
+                    self.activity = None;
                     self.fire_session_autocmd("TurnEnd", serde_json::json!({}));
+                    let after_compact = self.pending_compacts > 0;
+                    self.pending_compacts = self.pending_compacts.saturating_sub(1);
+                    if self.wants_suggestions(after_compact) {
+                        return vec![Action::Suggest];
+                    }
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Success;
                     }
                 }
                 ChatEventResult::Error(message) => {
                     self.status = Status::error(message.clone());
+                    self.activity = None;
                     self.status_bar.clear_flash();
                     self.subagent_answers.clear();
                     self.terminalize_turn(&message);
@@ -1161,6 +1291,22 @@ impl App {
             }
         }
         vec![]
+    }
+
+    /// Subagent, cancelled and failed turns never reach the caller, so this
+    /// only has to rule out the endings that look like a finished turn but are
+    /// not one worth spending on.
+    fn wants_suggestions(&self, after_compact: bool) -> bool {
+        // `/compact` ends with an ordinary Done on the live run.
+        !after_compact
+            // Another prompt is already waiting, so anything offered now is
+            // superseded before it can be read.
+            && self.queue.is_empty()
+            // Launched to run one turn and quit.
+            && !self.exit_on_done
+            // The plan form owns the bottom of the screen and already says what
+            // happens next.
+            && !self.plan_form_active()
     }
 
     fn resolve_or_create_chat(&mut self, subagent: &SubagentInfo) -> usize {
@@ -1193,6 +1339,94 @@ impl App {
         idx
     }
 
+    /// Unlike `/thinking`, this refuses a level the model never offered rather
+    /// than quietly snapping it down, so asking for `max` on a model that stops
+    /// at `high` says so instead of pretending.
+    fn set_effort(&mut self, arg: &str) {
+        let model = &self.state.model;
+        if !model.supports_thinking() {
+            self.flash(EFFORT_UNSUPPORTED_MSG.into());
+            return;
+        }
+        let Some(options) = model_registry::effort_options(&model.provider, &model.id) else {
+            self.flash(EFFORT_BUDGET_ONLY_MSG.into());
+            return;
+        };
+        let spec = model.spec();
+
+        if EFFORT_CLEAR_ARGS.contains(&arg) {
+            model_registry::unset_effort_and_persist(&spec, &self.storage);
+            self.flash(EFFORT_CLEARED_MSG.into());
+            return;
+        }
+
+        let levels = options
+            .supported
+            .iter()
+            .map(|e| {
+                if options.default == Some(*e) {
+                    format!("{e} (default)")
+                } else {
+                    e.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        if arg.is_empty() {
+            let current = model_registry::model_registry()
+                .read()
+                .unwrap()
+                .effort_for(&spec);
+            let now = current.map_or_else(
+                || format!("{}", self.state.thinking),
+                |e| format!("{e} (set for this model)"),
+            );
+            self.flash(format!("Effort: {now}. Supports: {levels}"));
+            return;
+        }
+
+        match arg.parse::<Effort>() {
+            Ok(level) if options.supported.contains(&level) => {
+                model_registry::set_effort_and_persist(spec, level, &self.storage);
+                self.flash(format!("Effort for {}: {level}", model.id));
+            }
+            _ => self.flash(format!("{} supports: {levels}", model.id)),
+        }
+    }
+
+    /// Sets only the sort, because that is the knob worth changing mid-session.
+    /// Ignore and only lists are long and belong in `providers.toml`, and this
+    /// override deliberately replaces the file's routing wholesale so what you
+    /// asked for is what gets sent.
+    fn set_routing(&mut self, arg: &str) {
+        if arg.is_empty() {
+            let current = routing::session_override()
+                .and_then(|r| r.sort)
+                .map_or_else(
+                    || ROUTING_USAGE_MSG.to_string(),
+                    |s| format!("Provider sort: {}", s.as_str()),
+                );
+            self.flash(current);
+            return;
+        }
+        if ROUTING_CLEAR_ARGS.contains(&arg) {
+            routing::set_session_override(None);
+            self.flash(ROUTING_CLEARED_MSG.into());
+            return;
+        }
+        match arg.parse::<RoutingSort>() {
+            Ok(sort) => {
+                routing::set_session_override(Some(RoutingConfig {
+                    sort: Some(sort),
+                    ..Default::default()
+                }));
+                self.flash(format!("Provider sort: {}", sort.as_str()));
+            }
+            Err(_) => self.flash(ROUTING_USAGE_MSG.into()),
+        }
+    }
+
     fn execute_command(&mut self, cmd: ParsedCommand) -> Vec<Action> {
         self.input_box.discard();
         match cmd.name.as_str() {
@@ -1201,6 +1435,9 @@ impl App {
                 vec![]
             }
             "/compact" => {
+                // Compaction signals completion with an ordinary Done, so the
+                // turn-end handler needs telling that one is expected.
+                self.pending_compacts += 1;
                 if self.status == Status::Streaming {
                     self.queue_compact();
                     return vec![];
@@ -1263,16 +1500,39 @@ impl App {
             }
             "/thinking" => {
                 if !self.state.model.supports_thinking() {
-                    self.flash("Thinking requires a model that supports it".into());
+                    self.flash(THINKING_UNSUPPORTED_MSG.into());
                     return vec![];
                 }
-                match ThinkingConfig::parse(cmd.args.trim(), self.state.thinking) {
+                let args = cmd.args.trim();
+                // Bare `/thinking` used to blind-toggle, which never showed what
+                // the options were. Typed arguments still bypass the list.
+                if args.is_empty() {
+                    self.thinking_picker
+                        .open(&self.state.model, self.state.thinking);
+                    return vec![];
+                }
+                match ThinkingConfig::parse(args, self.state.thinking) {
                     Ok(thinking) => {
                         self.state.thinking = thinking;
                         self.flash(format!("Thinking: {thinking}"));
                     }
                     Err(msg) => self.flash(msg.into()),
                 }
+                vec![]
+            }
+            "/effort" => {
+                self.set_effort(&cmd.args.trim().to_lowercase());
+                vec![]
+            }
+            "/improve" => {
+                // Typing the command consumed whatever was in the box, so the
+                // rest of the line is the draft. Empty is fine: the editor can
+                // build one from instructions alone.
+                self.open_prompt_editor(cmd.args.trim());
+                vec![]
+            }
+            "/provider" => {
+                self.set_routing(&cmd.args.trim().to_lowercase());
                 vec![]
             }
             "/fast" => {
@@ -1434,7 +1694,7 @@ impl App {
         vec![]
     }
 
-    fn overlays(&self) -> [&dyn Overlay; 13] {
+    fn overlays(&self) -> [&dyn Overlay; 15] {
         [
             &self.help_modal,
             &self.usage_modal,
@@ -1445,14 +1705,16 @@ impl App {
             &self.task_picker,
             &self.rewind_picker,
             &self.theme_picker,
+            &self.thinking_picker,
             &self.model_picker,
             &self.login_picker,
             &self.mcp_picker,
             &self.permission_prompt,
+            &self.prompt_editor,
         ]
     }
 
-    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 13] {
+    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 15] {
         [
             &mut self.help_modal,
             &mut self.usage_modal,
@@ -1463,10 +1725,12 @@ impl App {
             &mut self.task_picker,
             &mut self.rewind_picker,
             &mut self.theme_picker,
+            &mut self.thinking_picker,
             &mut self.model_picker,
             &mut self.login_picker,
             &mut self.mcp_picker,
             &mut self.permission_prompt,
+            &mut self.prompt_editor,
         ]
     }
 
@@ -1567,6 +1831,7 @@ impl App {
         try_picker!(self.task_picker);
         try_picker!(self.rewind_picker);
         try_picker!(self.theme_picker);
+        try_picker!(self.thinking_picker);
         try_picker!(self.model_picker);
         try_picker!(self.mcp_picker);
         try_picker!(self.login_picker);
@@ -1635,6 +1900,34 @@ impl App {
         actions.extend(self.start_from_queue(&msg));
         actions
     }
+}
+
+/// Tab takes the first, the way every editor has trained people to expect.
+/// Beyond that it is ctrl-chorded, so a bare digit still types a digit: a
+/// suggestion you have to dismiss before you can type `1` would be worse than
+/// no suggestion at all.
+fn accepted_suggestion(key: KeyEvent, prompts: &[String]) -> Option<String> {
+    if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+        return prompts.first().cloned();
+    }
+    if !is_ctrl(&key) {
+        return None;
+    }
+    let KeyCode::Char(c @ '1'..='9') = key.code else {
+        return None;
+    };
+    let index = c.to_digit(10)? as usize - 1;
+    prompts.get(index).cloned()
+}
+
+/// Typing, submitting or escaping all mean the suggestions have been passed
+/// over. Navigation and resizing do not, so scrolling back through the answer
+/// does not throw them away.
+fn dismisses_suggestions(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Char(_) | KeyCode::Enter | KeyCode::Esc | KeyCode::Backspace
+    )
 }
 
 fn is_streaming_stop_key(key: KeyEvent) -> bool {
