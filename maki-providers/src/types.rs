@@ -379,6 +379,7 @@ const THINKING_USAGE: &str =
 /// never told us its output window. 32k matches common frontier thinking
 /// caps. Explicit user budgets never go through this.
 const FALLBACK_MAX_THINKING_BUDGET: u32 = 32_768;
+const THINKING_OFF_LABEL: &str = "thinking off";
 
 /// First Claude version that speaks adaptive thinking. Opus got there a
 /// generation early, at 4.7; the other families joined at 5.
@@ -615,7 +616,14 @@ impl ThinkingConfig {
             return Some(Cow::Owned(format!("thinking: {effort}")));
         }
         match effective_thinking(model, self) {
-            Self::Off => None,
+            // A pin outranked by a global off is state you cannot see anywhere
+            // else from here, and it survives restarts. Name it instead of
+            // leaving someone to wonder why pinning did nothing.
+            Self::Off => model
+                .supports_thinking()
+                .then(|| per_model_effort(model))
+                .flatten()
+                .map(|pinned| Cow::Owned(format!("{THINKING_OFF_LABEL}, {pinned} pinned"))),
             Self::Adaptive => Some(Cow::Borrowed("thinking")),
             Self::Effort(e) => Some(Cow::Owned(format!("thinking: {e}"))),
             Self::Budget(n) => Some(Cow::Owned(format!("thinking: {n}"))),
@@ -1046,8 +1054,14 @@ mod tests {
         assert_eq!(opts.clamped(&model).thinking, expected);
     }
 
-    /// Unique id so this never races another test through the global registry.
-    const EFFORT_PROBE_MODEL: &str = "clamped-effort-probe";
+    /// The effort registry is global, so two tests sharing a model id race:
+    /// one's cleanup clears the other's pin mid-assertion. Every case gets its
+    /// own id instead of a shared const.
+    fn probe_model(id: &str) -> crate::model::Model {
+        let mut model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        model.id = id.into();
+        model
+    }
 
     fn with_stored_effort<T>(
         model: &crate::model::Model,
@@ -1067,15 +1081,18 @@ mod tests {
         out
     }
 
-    #[test_case(ThinkingConfig::Adaptive,             ThinkingConfig::Effort(Low) ; "beats_adaptive")]
-    #[test_case(ThinkingConfig::Effort(High),         ThinkingConfig::Effort(Low) ; "beats_explicit_effort")]
-    #[test_case(ThinkingConfig::Budget(8192),         ThinkingConfig::Effort(Low) ; "beats_budget")]
+    #[test_case("pin-vs-adaptive", ThinkingConfig::Adaptive,     ThinkingConfig::Effort(Low) ; "beats_adaptive")]
+    #[test_case("pin-vs-effort",   ThinkingConfig::Effort(High), ThinkingConfig::Effort(Low) ; "beats_explicit_effort")]
+    #[test_case("pin-vs-budget",   ThinkingConfig::Budget(8192), ThinkingConfig::Effort(Low) ; "beats_budget")]
     // A stored level must never resurrect thinking after an explicit off: these
     // persist across restarts and would quietly spend tokens forever.
-    #[test_case(ThinkingConfig::Off,                  ThinkingConfig::Off         ; "never_overrides_off")]
-    fn clamped_prefers_per_model_effort(session: ThinkingConfig, expected: ThinkingConfig) {
-        let mut model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
-        model.id = EFFORT_PROBE_MODEL.into();
+    #[test_case("pin-vs-off",      ThinkingConfig::Off,          ThinkingConfig::Off         ; "never_overrides_off")]
+    fn clamped_prefers_per_model_effort(
+        probe_id: &str,
+        session: ThinkingConfig,
+        expected: ThinkingConfig,
+    ) {
+        let model = probe_model(probe_id);
         let opts = RequestOptions {
             thinking: session,
             fast: false,
@@ -1084,10 +1101,38 @@ mod tests {
         assert_eq!(got, expected);
     }
 
+    /// A pin the session has switched off is invisible everywhere else in the
+    /// main view, so the bar has to be the one to mention it.
+    #[test]
+    fn status_label_names_a_pin_that_off_is_suppressing() {
+        let model = probe_model("status-label-pinned");
+        let label = with_stored_effort(&model, Low, || {
+            ThinkingConfig::Off
+                .status_label(&model)
+                .map(|c| c.to_string())
+        });
+        assert_eq!(label.as_deref(), Some("thinking off, low pinned"));
+    }
+
+    #[test]
+    fn status_label_stays_quiet_when_off_with_no_pin() {
+        let model = probe_model("status-label-unpinned");
+        assert_eq!(ThinkingConfig::Off.status_label(&model), None);
+    }
+
+    /// Naming a pin on a model that cannot reason at all would just be noise.
+    #[test]
+    fn status_label_ignores_a_pin_when_the_model_cannot_think() {
+        let mut model = probe_model("status-label-cannot-think");
+        model.supports_thinking_override = Some(false);
+
+        let label = with_stored_effort(&model, Low, || ThinkingConfig::Off.status_label(&model));
+        assert_eq!(label, None);
+    }
+
     #[test]
     fn clamped_still_forces_off_when_model_cannot_think() {
-        let mut model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
-        model.id = EFFORT_PROBE_MODEL.into();
+        let mut model = probe_model("clamped-cannot-think");
         model.supports_thinking_override = Some(false);
         let opts = RequestOptions {
             thinking: ThinkingConfig::Adaptive,
