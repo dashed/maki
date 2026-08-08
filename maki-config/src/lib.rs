@@ -133,7 +133,7 @@ pub const TOP_LEVEL_FIELDS: &[ConfigField] = &[
         ty: "bool | string",
         default: ConfigValue::Bool(false),
         min: None,
-        description: "Start every session with extended thinking (true/\"adaptive\", \"off\", an effort level (\"minimal\" to \"max\"), or a token budget)",
+        description: "Start every session with extended thinking (true/\"adaptive\", \"off\", an effort level (\"minimal\" to \"max\"), or a token budget). Or press `d` in `/thinking` to remember a choice without editing this file; setting it here wins over that",
     },
 ];
 

@@ -89,6 +89,7 @@ const AUTH_EXPIRED_MSG: &str =
 const FLASH_NO_PLAN: &str = "No plan file";
 const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
 const THINKING_UNSUPPORTED_MSG: &str = "Thinking requires a model that supports it";
+const THINKING_DEFAULT_MSG: &str = "New sessions will start with";
 const EFFORT_UNSUPPORTED_MSG: &str = "Effort requires a model that supports thinking";
 const EFFORT_BUDGET_ONLY_MSG: &str =
     "This provider sets thinking by token budget, use /thinking <tokens>";
@@ -681,6 +682,12 @@ impl App {
                 ThinkingPickerAction::Select(thinking) => {
                     self.state.thinking = thinking;
                     self.flash(format!("Thinking: {thinking}"));
+                    vec![]
+                }
+                ThinkingPickerAction::SetDefault(thinking) => {
+                    self.state.thinking = thinking;
+                    maki_storage::thinking::persist_default(&self.storage, thinking.into());
+                    self.flash(format!("{THINKING_DEFAULT_MSG}: {thinking}"));
                     vec![]
                 }
                 ThinkingPickerAction::Close => vec![],

@@ -3,14 +3,16 @@
 //! Only the levels the current model actually accepts are listed, which is why
 //! this asks the registry rather than showing all six every time.
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
 
 use maki_providers::{Effort, Model, ThinkingConfig, model_registry, resolved_effort};
 
 use crate::components::Overlay;
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
+use crate::theme;
 
 const TITLE: &str = " Thinking ";
 const MAX_VISIBLE: u16 = 12;
@@ -23,10 +25,23 @@ const ADAPTIVE_DETAIL: &str = "let the model decide";
 const CURRENT_DETAIL: &str = "current";
 const MODEL_DEFAULT_DETAIL: &str = "model default";
 const BUDGET_HINT: &str = "type /thinking <tokens> for a budget";
+const DEFAULT_KEY: char = 'd';
+
+fn footer_line() -> Line<'static> {
+    let t = theme::current();
+    Line::from(vec![
+        Span::styled("  Enter", t.keybind_key),
+        Span::styled(" use now", t.tool_dim),
+        Span::styled("  d", t.keybind_key),
+        Span::styled(" use and remember", t.tool_dim),
+    ])
+}
 
 pub enum ThinkingPickerAction {
     Consumed,
     Select(ThinkingConfig),
+    /// Use it now and remember it for new sessions.
+    SetDefault(ThinkingConfig),
     Close,
 }
 
@@ -63,7 +78,9 @@ pub struct ThinkingPicker {
 impl ThinkingPicker {
     pub fn new() -> Self {
         Self {
-            picker: ListPicker::new().with_max_visible(MAX_VISIBLE),
+            picker: ListPicker::new()
+                .with_max_visible(MAX_VISIBLE)
+                .with_footer_builder(footer_line),
         }
     }
 
@@ -87,6 +104,14 @@ impl ThinkingPicker {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ThinkingPickerAction {
+        if key.code == KeyCode::Char(DEFAULT_KEY)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(entry) = self.picker.selected_item()
+        {
+            let config = entry.config;
+            self.close();
+            return ThinkingPickerAction::SetDefault(config);
+        }
         match self.picker.handle_key(key) {
             PickerAction::Consumed => ThinkingPickerAction::Consumed,
             PickerAction::Select(entry) => ThinkingPickerAction::Select(entry.config),
@@ -258,6 +283,21 @@ mod tests {
             action,
             ThinkingPickerAction::Select(ThinkingConfig::Off)
         ));
+    }
+
+    #[test]
+    fn d_remembers_the_highlighted_option_and_closes() {
+        let mut p = ThinkingPicker::new();
+        p.open(&model(EFFORT_PROVIDER), ThinkingConfig::Off);
+        // Second row is adaptive.
+        p.handle_key(key(KeyCode::Down));
+
+        let action = p.handle_key(key(KeyCode::Char(DEFAULT_KEY)));
+        assert!(matches!(
+            action,
+            ThinkingPickerAction::SetDefault(ThinkingConfig::Adaptive)
+        ));
+        assert!(!p.is_open());
     }
 
     #[test]
