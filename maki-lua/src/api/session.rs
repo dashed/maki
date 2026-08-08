@@ -143,6 +143,7 @@ async fn prompt(
 /// @return (boolean|nil, string|nil) true, or nil and an error.
 /// @example
 /// maki.session.notify("[monitor] deploy failed", { session = id, wake = true })
+/// maki.session.notify("build is green", { session = id, wake = true, from = "reviewer" })
 #[lua_fn]
 fn notify(_lua: &Lua, text: String, opts: Option<Table>) -> LuaResult<Pair<bool>> {
     if text.trim().is_empty() {
@@ -159,7 +160,11 @@ fn notify(_lua: &Lua, text: String, opts: Option<Table>) -> LuaResult<Pair<bool>
         Err(error) => return Ok(err_pair(error)),
     };
     let wake = opts.get("wake").unwrap_or(false);
-    if let Err(error) = SessionMailbox::notify(session_id, text, wake) {
+    // Named by the caller, not derived here. A tool handler knows its own
+    // session from `ctx:session_id()`, which is what makes the name something
+    // the model calling that tool cannot choose.
+    let from: Option<String> = opts.get("from")?;
+    if let Err(error) = SessionMailbox::notify(session_id, text, from.as_deref(), wake) {
         return Ok(err_pair(error));
     }
     Ok((Some(true), None))

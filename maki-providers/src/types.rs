@@ -210,6 +210,21 @@ pub struct Message {
     pub kind: MessageKind,
 }
 
+const FROM_OPEN: &str = "<from agent=\"";
+const FROM_CLOSE: &str = "</from>";
+
+/// The `<` is removed rather than escaped: no legitimate message needs the
+/// delimiter, and leaving a recognisable form invites a reader to treat it as
+/// markup anyway.
+fn declaw(text: &str) -> String {
+    text.replace("</from", "/from").replace("<from", "from")
+}
+
+fn attributed(from: &str, text: &str) -> String {
+    let from = from.replace(['"', '\n', '\r'], " ");
+    format!("{FROM_OPEN}{from}\">\n{}\n{FROM_CLOSE}", declaw(text))
+}
+
 impl Message {
     /// Something the host saw, reported to the model without pretending
     /// the user said it.
@@ -220,6 +235,37 @@ impl Message {
             kind: MessageKind::Observation,
             ..Default::default()
         }
+    }
+
+    /// Attribution has to live in the content: the wire type is role plus
+    /// content only, so `kind` never reaches the model and cannot carry a
+    /// sender. The host writes the wrapper from a name it was told out of
+    /// band, and `display_text` keeps the plain body so the markup is never
+    /// shown to the user.
+    ///
+    /// Residual limit worth knowing: a message can still *claim* in prose to
+    /// be from someone else. What it cannot do is produce a second well-formed
+    /// block, because the delimiter is stripped from the body — so the
+    /// outermost wrapper is always the one the host wrote.
+    pub fn observation_from(from: Option<&str>, text: String) -> Self {
+        let Some(from) = from else {
+            return Self::observation(text);
+        };
+        Self {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: attributed(from, &text),
+            }],
+            display_text: Some(text),
+            kind: MessageKind::Observation,
+        }
+    }
+
+    /// The sender the host wrapped this in, if any.
+    pub fn observation_sender(&self) -> Option<&str> {
+        let rest = self.first_text_content()?.strip_prefix(FROM_OPEN)?;
+        let end = rest.find('"')?;
+        Some(&rest[..end])
     }
 
     pub fn is_observation(&self) -> bool {

@@ -243,6 +243,7 @@ impl<'h> Agent<'h> {
         };
         self.event_tx.send(AgentEvent::MailboxMessage {
             text: text.to_string(),
+            from: message.observation_sender().map(str::to_string),
         })?;
         Ok(())
     }
@@ -748,7 +749,7 @@ mod tests {
         smol::block_on(async {
             let id = maki_storage::id::MakiId::generate();
             let mailbox = SessionMailbox::register(id);
-            SessionMailbox::notify(id, "mailbox".into(), false).unwrap();
+            SessionMailbox::notify(id, "mailbox".into(), None, false).unwrap();
             let mut history = History::new(Vec::new());
             let (mut agent, _event_rx) = make_agent(
                 MockProvider::new(vec![text_response(StopReason::EndTurn)]),
@@ -788,7 +789,7 @@ mod tests {
             // First model call: nothing waiting for it.
             agent.turn().await.unwrap();
             // A peer sends while the agent is mid-run.
-            SessionMailbox::notify(id, "peer says hello".into(), true).unwrap();
+            SessionMailbox::notify(id, "peer says hello".into(), None, true).unwrap();
             agent.turn().await.unwrap();
             drop(agent);
 
@@ -809,7 +810,7 @@ mod tests {
         smol::block_on(async {
             let id = maki_storage::id::MakiId::generate();
             let mailbox = SessionMailbox::register(id);
-            SessionMailbox::notify(id, "peer says hello".into(), true).unwrap();
+            SessionMailbox::notify(id, "peer says hello".into(), None, true).unwrap();
             let mut history = History::new(Vec::new());
             let (mut agent, event_rx) = make_agent(
                 MockProvider::new(vec![text_response(StopReason::EndTurn)]),
@@ -821,9 +822,38 @@ mod tests {
             drop(agent);
 
             let announced = event_rx.try_iter().any(|e| {
-                matches!(e.event, AgentEvent::MailboxMessage { ref text } if text == "peer says hello")
+                matches!(e.event, AgentEvent::MailboxMessage { ref text, .. } if text == "peer says hello")
             });
             assert!(announced, "expected a MailboxMessage event");
+        });
+    }
+
+    #[test]
+    fn an_attributed_message_announces_its_sender() {
+        smol::block_on(async {
+            let id = maki_storage::id::MakiId::generate();
+            let mailbox = SessionMailbox::register(id);
+            SessionMailbox::notify(id, "build is green".into(), Some("reviewer"), true).unwrap();
+            let mut history = History::new(Vec::new());
+            let (mut agent, event_rx) = make_agent(
+                MockProvider::new(vec![text_response(StopReason::EndTurn)]),
+                &mut history,
+            );
+            agent.mailbox = Some(mailbox);
+
+            agent.turn().await.unwrap();
+            drop(agent);
+
+            let named = event_rx.try_iter().any(|e| {
+                matches!(e.event, AgentEvent::MailboxMessage { ref from, .. }
+                    if from.as_deref() == Some("reviewer"))
+            });
+            assert!(named, "expected the sender on the event");
+
+            // The model sees the wrapper; the transcript sees the plain body.
+            let msg = &history.as_slice()[0];
+            assert!(msg.first_text_content().unwrap().contains("reviewer"));
+            assert_eq!(msg.user_text(), Some("build is green"));
         });
     }
 
@@ -844,7 +874,7 @@ mod tests {
             drop(agent);
 
             let announced = event_rx.try_iter().any(|e| {
-                matches!(e.event, AgentEvent::MailboxMessage { ref text } if text == "woken by a peer")
+                matches!(e.event, AgentEvent::MailboxMessage { ref text, .. } if text == "woken by a peer")
             });
             assert!(announced, "expected a MailboxMessage event");
         });
@@ -857,7 +887,7 @@ mod tests {
         smol::block_on(async {
             let id = maki_storage::id::MakiId::generate();
             let mailbox = SessionMailbox::register(id);
-            SessionMailbox::notify(id, "peer says hello".into(), true).unwrap();
+            SessionMailbox::notify(id, "peer says hello".into(), None, true).unwrap();
             let mut history = History::new(Vec::new());
             let (mut agent, _event_rx) = make_agent(
                 MockProvider::new(vec![text_response(StopReason::EndTurn)]),
@@ -881,7 +911,7 @@ mod tests {
         smol::block_on(async {
             let id = maki_storage::id::MakiId::generate();
             let mailbox = SessionMailbox::register(id);
-            SessionMailbox::notify(id, "peer says hello".into(), true).unwrap();
+            SessionMailbox::notify(id, "peer says hello".into(), None, true).unwrap();
             let mut history = History::new(Vec::new());
             let (mut agent, _event_rx) = make_agent(
                 MockProvider::new(vec![text_response(StopReason::EndTurn)]),
@@ -922,7 +952,7 @@ mod tests {
         smol::block_on(async {
             let id = maki_storage::id::MakiId::generate();
             let mailbox = SessionMailbox::register(id);
-            SessionMailbox::notify(id, "mailbox".into(), false).unwrap();
+            SessionMailbox::notify(id, "mailbox".into(), None, false).unwrap();
             let mut input = default_input();
             input.preamble = vec![Message::observation("preamble".into())];
             let source = MockInterruptSource::new(vec![ExtractedCommand::Interrupt(input, 0)]);
@@ -950,7 +980,7 @@ mod tests {
         smol::block_on(async {
             let id = maki_storage::id::MakiId::generate();
             let mailbox = SessionMailbox::register(id);
-            SessionMailbox::notify(id, "failed".into(), true).unwrap();
+            SessionMailbox::notify(id, "failed".into(), None, true).unwrap();
             let mut history = History::new(Vec::new());
             let (mut agent, _event_rx) = make_agent(
                 MockProvider::new(vec![text_response(StopReason::EndTurn)]),

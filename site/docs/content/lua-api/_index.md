@@ -2702,6 +2702,7 @@ observation waits for the session's next agent run.
 
 ```lua
 maki.session.notify("[monitor] deploy failed", { session = id, wake = true })
+maki.session.notify("build is green", { session = id, wake = true, from = "reviewer" })
 ```
 
 ---

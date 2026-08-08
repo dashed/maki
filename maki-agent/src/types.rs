@@ -539,6 +539,9 @@ pub enum AgentEvent {
     /// from the transcript and would otherwise arrive invisibly.
     MailboxMessage {
         text: String,
+        /// Who the host attributed it to, when it was attributed at all. A
+        /// plugin notification has no sender.
+        from: Option<String>,
     },
     ToolPending {
         id: String,

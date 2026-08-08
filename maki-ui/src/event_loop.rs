@@ -1239,7 +1239,7 @@ mod tests {
     fn wake_arriving_while_working_runs_when_idle() {
         let id = maki_storage::id::MakiId::generate();
         let mailbox = maki_agent::SessionMailbox::register(id);
-        maki_agent::SessionMailbox::notify(id, OBSERVATION.into(), true).unwrap();
+        maki_agent::SessionMailbox::notify(id, OBSERVATION.into(), None, true).unwrap();
 
         assert!(claim_idle_wake(SessionStatus::Working, || mailbox.claim_wake()).is_none());
         let preamble = claim_idle_wake(SessionStatus::Idle, || mailbox.claim_wake()).unwrap();
