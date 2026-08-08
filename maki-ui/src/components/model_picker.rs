@@ -361,9 +361,26 @@ impl ModelPicker {
         }
         drop(guard);
         self.dirty = false;
+        // Where the user is, not where the session's model happens to be. The
+        // role rows carry the same specs as the models they point at, so the
+        // kind of row has to match too or an edit slides you up into the
+        // summary.
+        let anchor = self
+            .picker
+            .selected_item()
+            .filter(|e| !e.spec.is_empty())
+            .map(|e| (e.spec.clone(), e.is_role));
+
         let (entries, idx) = self.load_entries();
         self.picker.replace_items(entries);
-        self.picker.select(idx);
+
+        let restored = anchor.is_some_and(|(spec, was_role)| {
+            self.picker
+                .select_item_by(|e| e.spec == spec && e.is_role == was_role)
+        });
+        if !restored {
+            self.picker.select(idx);
+        }
     }
 
     fn load_entries(&mut self) -> (Vec<ModelEntry>, usize) {
@@ -883,6 +900,77 @@ mod tests {
         p.open("");
         p.handle_key(key(KeyCode::Char('?')));
         assert!(!p.show_help, "bare ? must not open help");
+    }
+
+    /// Editing marked the list dirty and the refresh re-selected the session's
+    /// current model, so every assign or effort cycle threw you back there.
+    #[test]
+    fn an_edit_leaves_you_on_the_row_you_were_on() {
+        let mut p = ModelPicker::new(test_models());
+        // Open with one model current, then move somewhere else.
+        p.open("anthropic/claude-sonnet-4-20250514");
+        assert!(
+            p.picker
+                .select_item_by(|e| !e.is_role && e.spec == "zai/glm-5")
+        );
+
+        p.handle_key(ctrl(EFFORT_KEY));
+        p.try_refresh();
+
+        let landed = p.picker.selected_item().expect("a row is selected");
+        assert!(!landed.is_role);
+        assert_eq!(
+            landed.spec, "zai/glm-5",
+            "an edit must not move the highlight to the current model"
+        );
+    }
+
+    /// Role rows share their spec with the model they point at, so restoring by
+    /// spec alone would slide the highlight up into the summary. Needs a role
+    /// that actually resolves, hence the override.
+    #[test]
+    fn refresh_keeps_a_role_row_a_role_row() {
+        const PINNED: &str = "zai/glm-5";
+        // Suggest, because no other test in this crate asserts on it.
+        model_registry::model_registry()
+            .write()
+            .unwrap()
+            .set(PINNED.to_string(), ModelTier::Suggest);
+
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        let found = p.picker.select_item_by(|e| e.is_role && e.spec == PINNED);
+        let landed = found.then(|| {
+            p.dirty = true;
+            p.try_refresh();
+            let row = p.picker.selected_item().expect("a row is selected");
+            (row.is_role, row.spec.clone())
+        });
+
+        model_registry::model_registry()
+            .write()
+            .unwrap()
+            .unset(PINNED, ModelTier::Suggest);
+
+        assert_eq!(
+            landed,
+            Some((true, PINNED.to_string())),
+            "a refresh must leave a role row on the role row"
+        );
+    }
+
+    /// Searching, then editing, must not also throw away the query.
+    #[test]
+    fn an_edit_keeps_the_search_query() {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        p.handle_key(key(KeyCode::Char('g')));
+        let filtered = p.picker.visible_len();
+
+        p.dirty = true;
+        p.try_refresh();
+
+        assert_eq!(p.picker.visible_len(), filtered, "query should survive");
     }
 
     #[test]
