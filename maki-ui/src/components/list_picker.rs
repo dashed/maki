@@ -25,6 +25,18 @@ const MIN_WIDTH_PERCENT: u16 = 65;
 const MAX_HEIGHT_PERCENT: u16 = 80;
 const SEARCH_ROW: u16 = 1;
 const DETAIL_RIGHT_PAD: u16 = 1;
+const CLOSE_KEY: &str = "esc";
+const CLOSE_LABEL: &str = " close";
+
+/// How to leave goes last, after whatever the picker itself wants to say. Every
+/// picker took esc already; none of them mentioned it.
+fn footer_with_close(custom: Option<fn() -> Line<'static>>) -> Line<'static> {
+    let t = theme::current();
+    let mut spans = custom.map(|build| build().spans).unwrap_or_default();
+    spans.push(Span::styled(format!("  {CLOSE_KEY}"), t.keybind_key));
+    spans.push(Span::styled(CLOSE_LABEL, t.tool_dim));
+    Line::from(spans)
+}
 
 pub trait PickerItem {
     fn label(&self) -> &str;
@@ -492,7 +504,8 @@ fn render_ready<T: PickerItem>(
     footer: Option<fn() -> Line<'static>>,
     error_text: Option<&str>,
 ) -> Rect {
-    let footer_rows = if footer.is_some() { 1u16 } else { 0 };
+    // Every picker gets a footer now, if only to say how to leave it.
+    let footer_rows = 1u16;
     let content_rows = if s.filtered.is_empty() {
         1
     } else {
@@ -519,16 +532,13 @@ fn render_ready<T: PickerItem>(
     s.viewport_height = viewport_h as usize;
     s.ensure_visible();
 
-    let mut constraints: Vec<Constraint> =
-        Vec::with_capacity(3 + footer.is_some() as usize + error_text.is_some() as usize);
+    let mut constraints: Vec<Constraint> = Vec::with_capacity(4 + error_text.is_some() as usize);
     if error_text.is_some() {
         constraints.push(Constraint::Length(1)); // error line
     }
     constraints.push(Constraint::Min(1)); // list
     constraints.push(Constraint::Length(1)); // search
-    if footer.is_some() {
-        constraints.push(Constraint::Length(1));
-    }
+    constraints.push(Constraint::Length(1)); // footer
 
     let areas = Layout::vertical(constraints).split(inner);
     let mut area_idx = 0;
@@ -560,9 +570,7 @@ fn render_ready<T: PickerItem>(
     );
     render_search(frame, search_area, &s.search);
 
-    if let Some(build) = footer {
-        frame.render_widget(Paragraph::new(build()), areas[area_idx]);
-    }
+    frame.render_widget(Paragraph::new(footer_with_close(footer)), areas[area_idx]);
 
     let total_visual = visual_rows_in_range(&s.filtered, &s.items, 0, s.filtered.len());
     if total_visual as u16 > viewport_h {
@@ -803,6 +811,32 @@ mod tests {
 
     fn ready_state<T>(p: &ListPicker<T>) -> &State<T> {
         p.state.as_ref().expect("expected open state")
+    }
+
+    /// Every picker took esc already; none of them said so.
+    #[test]
+    fn close_hint_shows_with_and_without_a_custom_footer() {
+        let bare: String = footer_with_close(None)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(bare.contains(CLOSE_KEY), "bare footer: {bare}");
+
+        fn custom() -> Line<'static> {
+            Line::from(vec![Span::raw("  Enter"), Span::raw(" select")])
+        }
+        let with_custom: String = footer_with_close(Some(custom))
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            with_custom.contains("select"),
+            "custom footer must survive: {with_custom}"
+        );
+        // Leaving comes last, after whatever the picker wanted to say.
+        assert!(with_custom.trim_end().ends_with(CLOSE_LABEL.trim_end()));
     }
 
     fn ready_state_mut<T>(p: &mut ListPicker<T>) -> &mut State<T> {

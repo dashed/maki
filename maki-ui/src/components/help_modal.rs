@@ -16,6 +16,8 @@ use unicode_width::UnicodeWidthStr;
 
 const TITLE: &str = " Keybindings ";
 const KEY_COL_GAP: usize = 2;
+const CLOSE_KEY: &str = "esc";
+const CLOSE_LABEL: &str = " close ";
 const PREFIX_TOP: &str = "  ";
 const PREFIX_CHILD: &str = "    ";
 
@@ -217,6 +219,23 @@ impl HelpModal {
         if total > viewport_h {
             render_vertical_scrollbar(frame, inner, total, scroll);
         }
+
+        // The keybinding list never listed the one for leaving it.
+        let hint = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(CLOSE_KEY, theme.keybind_key),
+            Span::styled(CLOSE_LABEL, theme.keybind_desc),
+        ]);
+        let hint_w = hint.width() as u16;
+        frame.render_widget(
+            Paragraph::new(hint),
+            Rect {
+                x: popup.x + popup.width.saturating_sub(hint_w + 1),
+                y: popup.y + popup.height.saturating_sub(1),
+                width: hint_w,
+                height: 1,
+            },
+        );
 
         popup
     }

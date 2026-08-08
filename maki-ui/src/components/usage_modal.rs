@@ -111,7 +111,9 @@ impl UsageModal {
         let hint = Line::from(vec![
             Span::raw(" "),
             Span::styled("Ctrl+R", theme.keybind_key),
-            Span::styled(" reload ", theme.tool_dim),
+            Span::styled(" reload  ", theme.tool_dim),
+            Span::styled("esc", theme.keybind_key),
+            Span::styled(" close ", theme.tool_dim),
         ]);
         let hint_w = hint.width() as u16;
         let hint_area = Rect {
