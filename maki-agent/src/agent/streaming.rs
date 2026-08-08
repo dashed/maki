@@ -1,5 +1,9 @@
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use maki_providers::provider::Provider;
 use maki_providers::retry::{MAX_TIMEOUT_RETRIES, RetryState};
+use maki_providers::stats;
 use maki_providers::{Message, Model, ProviderEvent, RequestOptions, StreamResponse};
 use maki_storage::id::SessionRef;
 use serde_json::Value;
@@ -8,8 +12,27 @@ use tracing::warn;
 use crate::cancel::CancelToken;
 use crate::{AgentError, AgentEvent, EventSender};
 
-async fn forward_provider_events(prx: flume::Receiver<ProviderEvent>, event_tx: &EventSender) {
+/// Returns when the first token landed, so the caller can bill the rest of the
+/// stream to throughput instead of blending the wait into it.
+async fn forward_provider_events(
+    prx: flume::Receiver<ProviderEvent>,
+    event_tx: &EventSender,
+    slug: &str,
+    started: Instant,
+) -> Option<Instant> {
+    let mut first_token = None;
     while let Ok(pe) = prx.recv_async().await {
+        // Progress events say the request was accepted, not that the model
+        // started answering, so they must not count as the first token.
+        if first_token.is_none()
+            && matches!(
+                pe,
+                ProviderEvent::TextDelta { .. } | ProviderEvent::ThinkingDelta { .. }
+            )
+        {
+            first_token = Some(Instant::now());
+            stats::record_first_token(slug, started.elapsed());
+        }
         let ae = match pe {
             ProviderEvent::TextDelta { text } => AgentEvent::TextDelta { text },
             ProviderEvent::ThinkingDelta { text } => AgentEvent::ThinkingDelta { text },
@@ -28,6 +51,7 @@ async fn forward_provider_events(prx: flume::Receiver<ProviderEvent>, event_tx: 
             break;
         }
     }
+    first_token
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -46,11 +70,14 @@ pub(crate) async fn stream_with_retry(
     let messages = maki_providers::adapt_images_for_model(model, messages);
     let messages = &*messages;
     let mut retry = RetryState::new();
+    let slug: Arc<str> = Arc::clone(&model.provider);
     loop {
+        let started = Instant::now();
         let (ptx, prx) = flume::unbounded();
         let forwarder = smol::spawn({
             let event_tx = event_tx.clone();
-            async move { forward_provider_events(prx, &event_tx).await }
+            let slug = Arc::clone(&slug);
+            async move { forward_provider_events(prx, &event_tx, &slug, started).await }
         });
         let result = futures_lite::future::race(
             provider.stream_message(model, messages, system, tools, &ptx, opts, session_id),
@@ -61,9 +88,14 @@ pub(crate) async fn stream_with_retry(
         )
         .await;
         drop(ptx);
-        let _ = forwarder.await;
+        let first_token = forwarder.await;
         match result {
-            Ok(r) => return Ok(r),
+            Ok(r) => {
+                let stream = first_token.map_or(Duration::ZERO, |t| t.elapsed());
+                stats::record_success(&slug, r.usage.output, stream);
+                return Ok(r);
+            }
+            // A cancel is the user changing their mind, not the provider failing.
             Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
             Err(e) if e.is_retryable() => {
                 if e.should_rotate_key()
@@ -93,7 +125,10 @@ pub(crate) async fn stream_with_retry(
                     return Err(AgentError::Cancelled);
                 }
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                stats::record_error(&slug);
+                return Err(e);
+            }
         }
     }
 }
