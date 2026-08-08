@@ -43,6 +43,12 @@ pub trait PickerItem {
     fn is_highlighted(&self) -> bool {
         false
     }
+    /// Header-ish rows that summarize rather than offer a choice. They show
+    /// while the query is empty and drop out of search, so typing `op` finds
+    /// `opus` without also dragging in a summary row named `compaction`.
+    fn is_summary(&self) -> bool {
+        false
+    }
 }
 
 impl PickerItem for String {
@@ -116,6 +122,7 @@ impl<T: PickerItem> State<T> {
                 .items
                 .iter()
                 .enumerate()
+                .filter(|(_, item)| !item.is_summary())
                 .map(|(idx, item)| (idx, item.label()))
                 .collect();
             let matches: HashSet<&str> = pattern

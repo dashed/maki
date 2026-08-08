@@ -20,6 +20,17 @@ use crate::theme;
 
 const TITLE: &str = " Models ";
 const RECENT_SECTION: &str = "Recent";
+const ROLE_SECTION: &str = "Roles";
+const PINNED_DETAIL: &str = "pinned";
+const AUTO_DETAIL: &str = "auto";
+const UNSET_DETAIL: &str = "unset";
+/// Strongest first, so the list reads the way people talk about the roles.
+const ROLE_TIERS: [ModelTier; 4] = [
+    ModelTier::Strong,
+    ModelTier::Medium,
+    ModelTier::Weak,
+    ModelTier::Compaction,
+];
 const HELP_TITLE: &str = " Models help ";
 const HELP_WIDTH_PERCENT: u16 = 72;
 const HELP_MAX_HEIGHT_PERCENT: u16 = 80;
@@ -32,8 +43,18 @@ const HELP_KEY: char = '?';
 const HELP_ROWS: &[(&str, &str, &str)] = &[
     (
         "Roles",
+        "",
+        "The rows at the top show which model holds each role right now,",
+    ),
+    (
+        "",
+        "",
+        "whether you pinned it or maki resolved it, and what it costs.",
+    ),
+    (
+        "Assign",
         "! @ # $",
-        "Assign this model to a role: strong, medium, weak, compaction.",
+        "Give the selected model a role: strong, medium, weak, compaction.",
     ),
     (
         "",
@@ -135,6 +156,10 @@ struct ModelEntry {
     override_tiers: Vec<ModelTier>,
     effort: Option<Effort>,
     supported_efforts: Vec<Effort>,
+    /// Role summary rows sit above the real list. They carry the spec they
+    /// resolve to so the normal keys still work on them, but they must not
+    /// steal the "current model" cursor from the model's own row.
+    is_role: bool,
 }
 
 impl PickerItem for ModelEntry {
@@ -156,6 +181,10 @@ impl PickerItem for ModelEntry {
 
     fn is_highlighted(&self) -> bool {
         !self.override_tiers.is_empty()
+    }
+
+    fn is_summary(&self) -> bool {
+        self.is_role
     }
 }
 
@@ -214,7 +243,7 @@ impl ModelPicker {
         let guard = self.models.load();
         let specs = guard.as_deref();
         self.last_spec_count = specs.map_or(0, Vec::len);
-        let mut entries: Vec<ModelEntry> = Vec::new();
+        let mut entries: Vec<ModelEntry> = role_entries();
         let recent_specs = self.recents.clone();
         for spec in &recent_specs {
             if let Some(mut e) = parse_model_entry(spec) {
@@ -234,7 +263,7 @@ impl ModelPicker {
         entries.extend(full);
         let idx = entries
             .iter()
-            .position(|e| e.spec == self.current_spec)
+            .position(|e| !e.is_role && e.spec == self.current_spec)
             .unwrap_or(0);
         (entries, idx)
     }
@@ -273,6 +302,7 @@ impl ModelPicker {
         if key.code == KeyCode::Char(EFFORT_KEY)
             && !key.modifiers.contains(KeyModifiers::CONTROL)
             && let Some(entry) = self.picker.selected_item()
+            && !entry.spec.is_empty()
             && !entry.supported_efforts.is_empty()
         {
             let spec = entry.spec.clone();
@@ -285,6 +315,7 @@ impl ModelPicker {
         }
         if let Some(tier) = tier_for_shortcut(key)
             && let Some(entry) = self.picker.selected_item()
+            && !entry.spec.is_empty()
         {
             let spec = entry.spec.clone();
             self.dirty = true;
@@ -295,6 +326,8 @@ impl ModelPicker {
         }
         match self.picker.handle_key(key) {
             PickerAction::Consumed => ModelPickerAction::Consumed,
+            // Enter on an unset role has nothing to switch to.
+            PickerAction::Select(entry) if entry.spec.is_empty() => ModelPickerAction::Consumed,
             PickerAction::Select(entry) => ModelPickerAction::Select(entry.spec),
             PickerAction::Close => ModelPickerAction::Close,
             PickerAction::Toggle(..) => ModelPickerAction::Consumed,
@@ -398,7 +431,61 @@ fn parse_model_entry(spec: &str) -> Option<ModelEntry> {
         override_tiers,
         effort,
         supported_efforts,
+        is_role: false,
     })
+}
+
+/// Four rows naming which model plays each role. Without these you had to hunt
+/// one highlighted row out of hundreds to learn what `!`/`@`/`#`/`$` had done.
+fn role_entries() -> Vec<ModelEntry> {
+    ROLE_TIERS
+        .iter()
+        .map(|&tier| {
+            let (resolved, pinned) = {
+                let map = model_registry::model_registry().read().unwrap();
+                let resolved = map.spec_for_tier_any(tier);
+                let pinned = resolved
+                    .as_deref()
+                    .is_some_and(|spec| map.has_override(spec, tier));
+                (resolved, pinned)
+            };
+
+            let Some(spec) = resolved else {
+                return role_row(tier, String::new(), None, UNSET_DETAIL.to_string());
+            };
+            let model_id = spec
+                .split_once('/')
+                .map_or(spec.clone(), |(_, id)| id.into());
+            let status = if pinned { PINNED_DETAIL } else { AUTO_DETAIL };
+            let detail = match price_label(&spec) {
+                Some(price) => format!("{status}{DETAIL_SEP}{price}"),
+                None => status.to_string(),
+            };
+            role_row(tier, spec, Some(model_id), detail)
+        })
+        .collect()
+}
+
+fn role_row(tier: ModelTier, spec: String, model_id: Option<String>, detail: String) -> ModelEntry {
+    ModelEntry {
+        spec,
+        id: tier.to_string(),
+        provider_display: ROLE_SECTION.to_string(),
+        suffix: model_id,
+        detail,
+        override_tiers: Vec::new(),
+        effort: None,
+        supported_efforts: Vec::new(),
+        is_role: true,
+    }
+}
+
+/// Only when the price is actually known, so an undiscovered model shows
+/// nothing rather than a confident `$0.00/$0.00`.
+fn price_label(spec: &str) -> Option<String> {
+    let pricing = maki_providers::Model::from_spec(spec).ok()?.pricing;
+    (pricing.input > 0.0 || pricing.output > 0.0)
+        .then(|| format!("${:.2}/${:.2}", pricing.input, pricing.output))
 }
 
 #[cfg(test)]
@@ -477,6 +564,50 @@ mod tests {
         assert!(parse_model_entry("no-slash").is_none());
     }
 
+    #[test]
+    fn role_rows_cover_every_tier_and_lead_the_list() {
+        let entries = role_entries();
+        let labels: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(labels, vec!["strong", "medium", "weak", "compaction"]);
+        assert!(entries.iter().all(|e| e.is_role));
+        assert!(entries.iter().all(|e| e.provider_display == ROLE_SECTION));
+    }
+
+    /// An unset role has no model behind it, so acting on it would otherwise
+    /// assign a tier to the empty spec.
+    #[test]
+    fn unset_role_row_is_inert() {
+        let row = role_row(ModelTier::Weak, String::new(), None, UNSET_DETAIL.into());
+        assert!(row.spec.is_empty());
+        assert!(row.supported_efforts.is_empty());
+        assert_eq!(row.detail, UNSET_DETAIL);
+    }
+
+    /// `op` fuzzy-matches `compaction`, so without excluding summary rows from
+    /// search a role row would surface every time someone hunted for opus.
+    #[test]
+    fn role_rows_drop_out_of_search_results() {
+        let mut p = ModelPicker::new(test_models());
+        p.open("");
+        p.handle_key(key(KeyCode::Char('o')));
+        p.handle_key(key(KeyCode::Char('p')));
+
+        let action = p.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(action, ModelPickerAction::Select(ref s) if s.contains("opus")),
+            "search must reach opus, not a role row",
+        );
+    }
+
+    #[test]
+    fn role_rows_never_steal_the_current_model_cursor() {
+        let mut p = ModelPicker::new(test_models());
+        p.open("zai/glm-5");
+        let selected = p.picker.selected_item().expect("a row is selected");
+        assert!(!selected.is_role);
+        assert_eq!(selected.spec, "zai/glm-5");
+    }
+
     #[test_case(key(KeyCode::Char('!')),           ModelTier::Strong     ; "legacy_bang_strong")]
     #[test_case(key(KeyCode::Char('$')),           ModelTier::Compaction ; "legacy_dollar_compaction")]
     #[test_case(key(KeyCode::Char('€')),           ModelTier::Compaction ; "legacy_euro_compaction")]
@@ -524,7 +655,9 @@ mod tests {
         ]);
         p.open("anthropic/claude-opus-4-6-20260101");
 
-        p.picker.select(0);
+        // Role summary rows lead the list, so the first real entry is the one
+        // that matters here.
+        p.picker.select_item_by(|e| !e.is_role);
         let action = p.handle_key(key(KeyCode::Enter));
         assert!(
             matches!(action, ModelPickerAction::Select(ref s) if s == "zai/glm-5"),
