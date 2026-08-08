@@ -163,19 +163,22 @@ impl ModelRegistry {
         provider: &str,
         static_tier: Option<ModelTier>,
     ) -> ModelTier {
-        // A spec may hold several tiers; prefer the strongest agent tier,
-        // falling back to Compaction only when it is the sole assignment.
-        let mut tiers = self
-            .overrides
-            .iter()
-            .rev()
-            .filter(|(_, s)| s.as_str() == spec)
-            .map(|(&t, _)| t);
-        if let Some(first) = tiers.next() {
-            return match first {
-                ModelTier::Compaction => tiers.next().unwrap_or(first),
-                t => t,
-            };
+        // A spec may hold several tiers; prefer the strongest agent role, and
+        // fall back to a side role only when the model holds nothing else.
+        // Asking `is_agent_tier` rather than skipping a fixed number of entries
+        // keeps this right however many side roles exist.
+        let tiers = || {
+            self.overrides
+                .iter()
+                .rev()
+                .filter(|(_, s)| s.as_str() == spec)
+                .map(|(&t, _)| t)
+        };
+        if let Some(tier) = tiers()
+            .find(|t| t.is_agent_tier())
+            .or_else(|| tiers().next())
+        {
+            return tier;
         }
         if let Some((_, model_id)) = spec.split_once('/')
             && let Some(models) = self.known_models.get(provider)
@@ -238,7 +241,9 @@ impl ModelRegistry {
             ModelTier::Strong => 0,
             ModelTier::Medium => 1,
             ModelTier::Weak => 2,
-            ModelTier::Compaction => return None,
+            // Side roles are opt-in. Guessing one from list position would put
+            // a model nobody chose to work, and bill for it.
+            ModelTier::Compaction | ModelTier::Suggest => return None,
         };
         Some(format!(
             "{provider}/{}",
@@ -506,6 +511,39 @@ mod tests {
     fn effort_options_fall_back_to_provider_dialect(provider: &str, expected: &[Effort]) {
         let options = effort_options(provider, "undiscovered-model").expect("dialect");
         assert_eq!(options.supported, expected);
+    }
+
+    /// The old code skipped exactly one entry to get past Compaction, so a
+    /// model holding two side roles plus a real one resolved to a side role.
+    #[test]
+    fn tier_for_looks_past_every_side_role() {
+        let mut reg = make_map(&[], &[]);
+        reg.set("ollama/busy".into(), ModelTier::Suggest);
+        reg.set("ollama/busy".into(), ModelTier::Compaction);
+        reg.set("ollama/busy".into(), ModelTier::Medium);
+
+        assert_eq!(
+            reg.tier_for("ollama/busy", "ollama", None),
+            ModelTier::Medium
+        );
+    }
+
+    #[test_case(ModelTier::Suggest    ; "suggest_only")]
+    #[test_case(ModelTier::Compaction ; "compaction_only")]
+    fn tier_for_reports_a_lone_side_role_as_itself(tier: ModelTier) {
+        let mut reg = make_map(&[], &[]);
+        reg.set("ollama/side".into(), tier);
+
+        assert_eq!(reg.tier_for("ollama/side", "ollama", None), tier);
+    }
+
+    /// Side roles are opt-in: nothing should draft prompts or compact until a
+    /// model is chosen for it.
+    #[test_case(ModelTier::Suggest    ; "suggest")]
+    #[test_case(ModelTier::Compaction ; "compaction")]
+    fn side_roles_are_never_guessed_by_position(tier: ModelTier) {
+        let reg = make_tiered(&[("alpha", ModelTier::Strong), ("beta", ModelTier::Medium)]);
+        assert_eq!(reg.positional_candidate("copilot", tier), None);
     }
 
     #[test]

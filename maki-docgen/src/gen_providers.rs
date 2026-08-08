@@ -297,6 +297,7 @@ fn tier_label(tier: ModelTier) -> &'static str {
         ModelTier::Medium => "Medium",
         ModelTier::Strong => "Strong",
         ModelTier::Compaction => "Compaction",
+        ModelTier::Suggest => "Suggest",
     }
 }
 

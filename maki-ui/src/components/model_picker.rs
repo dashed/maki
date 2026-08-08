@@ -25,11 +25,12 @@ const PINNED_DETAIL: &str = "pinned";
 const AUTO_DETAIL: &str = "auto";
 const UNSET_DETAIL: &str = "unset";
 /// Strongest first, so the list reads the way people talk about the roles.
-const ROLE_TIERS: [ModelTier; 4] = [
+const ROLE_TIERS: [ModelTier; 5] = [
     ModelTier::Strong,
     ModelTier::Medium,
     ModelTier::Weak,
     ModelTier::Compaction,
+    ModelTier::Suggest,
 ];
 const HELP_TITLE: &str = " Models help ";
 const HELP_WIDTH_PERCENT: u16 = 72;
@@ -53,8 +54,13 @@ const HELP_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "Assign",
-        "! @ # $",
-        "Give the selected model a role: strong, medium, weak, compaction.",
+        "! @ # $ %",
+        "Give the selected model a role: strong, medium, weak, compaction,",
+    ),
+    (
+        "",
+        "",
+        "suggest. The last two are side jobs, not models the agent runs on.",
     ),
     (
         "",
@@ -97,6 +103,8 @@ fn footer_line() -> Line<'static> {
         Span::styled(" weak", t.tool_dim),
         Span::styled("  $", t.keybind_key),
         Span::styled(" compaction", t.tool_dim),
+        Span::styled("  %", t.keybind_key),
+        Span::styled(" suggest", t.tool_dim),
         Span::styled("  e", t.keybind_key),
         Span::styled(" effort", t.tool_dim),
         Span::styled("  ?", t.keybind_key),
@@ -120,12 +128,13 @@ fn next_effort(current: Option<Effort>, supported: &[Effort]) -> Option<Effort> 
 fn tier_for_shortcut(key: KeyEvent) -> Option<ModelTier> {
     let digit = match (key.code, key.modifiers.contains(KeyModifiers::SHIFT)) {
         // Kitty protocol: Shift+digit reported with base key + SHIFT modifier
-        (KeyCode::Char(c @ '1'..='4'), true) => c,
+        (KeyCode::Char(c @ '1'..='5'), true) => c,
         // Legacy terminals: Shift+digit reported as the resulting character
         (KeyCode::Char('!' | '¡'), false) => '1', // US, ES
         (KeyCode::Char('@' | '"' | '™'), false) => '2', // US, UK/DE
         (KeyCode::Char('#' | '§' | '£'), false) => '3', // US, DE, UK
         (KeyCode::Char('$' | '€' | '¤'), false) => '4', // US, EU, Nordic
+        (KeyCode::Char('%' | '°'), false) => '5', // US, FR
         _ => return None,
     };
     match digit {
@@ -133,6 +142,7 @@ fn tier_for_shortcut(key: KeyEvent) -> Option<ModelTier> {
         '2' => Some(ModelTier::Medium),
         '3' => Some(ModelTier::Weak),
         '4' => Some(ModelTier::Compaction),
+        '5' => Some(ModelTier::Suggest),
         _ => None,
     }
 }
@@ -568,7 +578,10 @@ mod tests {
     fn role_rows_cover_every_tier_and_lead_the_list() {
         let entries = role_entries();
         let labels: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(labels, vec!["strong", "medium", "weak", "compaction"]);
+        assert_eq!(
+            labels,
+            vec!["strong", "medium", "weak", "compaction", "suggest"]
+        );
         assert!(entries.iter().all(|e| e.is_role));
         assert!(entries.iter().all(|e| e.provider_display == ROLE_SECTION));
     }
