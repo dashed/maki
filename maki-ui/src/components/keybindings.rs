@@ -379,6 +379,12 @@ pub const KEYBINDS: &[Keybind] = &[
         platform: Platform::All,
     },
     Keybind {
+        label: KeyLabel::Single("Ctrl+1..3"),
+        description: "Use a suggested follow-up prompt",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
         label: KeyLabel::Single("/command"),
         description: "Open command palette",
         context: KeybindContext::Editing,

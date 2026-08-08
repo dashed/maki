@@ -29,6 +29,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Enter` | Submit prompt |
 | `Shift+Enter` / `Ctrl+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
 | `Tab` | Toggle mode |
+| `Ctrl+1..3` | Use a suggested follow-up prompt |
 | `/command` | Open command palette |
 | `Ctrl+W` | Delete word backward |
 | `Alt+←` / `Alt+→` | Move word left / right |
