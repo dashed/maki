@@ -2680,6 +2680,47 @@ local state, err = maki.session.prompt("run the tests", { session = id })
 
 ---
 
+### `maki.session.send()` {#maki-session-send}
+
+```lua
+maki.session.send({text}, {opts?})
+```
+
+Reports {text} to a live session and says how it landed.
+
+The same delivery as `notify`, but answered by the UI event loop, which
+can see the recipient's state and act on it in the same step — so the
+outcome is observed rather than guessed. Use this from a tool handler;
+`notify` stays the synchronous one for autocmds and job callbacks.
+
+Outcomes: `"woken"` the session was idle and a turn was started for it;
+`"injected"` it was working, so the message joins its next model call;
+`"delivered"` it is queued and will be read at the recipient's next run.
+
+Honest limits. `"woken"` and `"injected"` need the TUI — under `-p`, ACP
+and the SDK the answer is always `"delivered"`, because nothing outside
+the interactive UI starts a turn for a waiting message. `"injected"` also
+covers a session parked on a permission prompt, where the message rides in
+only once a human answers. None of them means the message was read.
+
+**Parameters:**
+
+- `{text}` (`string`) What to report. Must not be blank.
+- `{opts?}` (`table`) Options:
+  - `session` (`string`) id of a live session.
+  - `wake` (`boolean`) start a turn if the session is idle (default false).
+  - `from` (`string`) who to attribute it to, for the model and the transcript.
+
+**Returns:** (`string|nil`, `string|nil`) the outcome, or nil and an error.
+
+**Example:**
+
+```lua
+local how, err = maki.session.send("tests are green", { session = id, wake = true, from = "reviewer" })
+```
+
+---
+
 ### `maki.session.notify()` {#maki-session-notify}
 
 ```lua

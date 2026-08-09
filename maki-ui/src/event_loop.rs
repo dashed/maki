@@ -19,7 +19,9 @@ use crossterm::event::{
 };
 use maki_agent::command::CustomCommand;
 use maki_agent::permissions::PermissionManager;
-use maki_agent::{AgentConfig, CancelToken, McpCommand, McpConfigErrors, McpHandle, mcp};
+use maki_agent::{
+    AgentConfig, CancelToken, McpCommand, McpConfigErrors, McpHandle, SessionMailbox, mcp,
+};
 use maki_config::UiConfig;
 use maki_lua::{
     EventHandle, HintReader, KeymapReader, LuaCommandReader, SessionReply, SessionRequest, UiAction,
@@ -54,6 +56,13 @@ const DRAIN_BUDGET: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
 const NOT_LIVE_ERR: &str = "session not live";
+/// How a message landed. `woken` and `injected` need a live runtime here;
+/// `delivered` is what a message gets when nothing is going to read it until
+/// the recipient runs again, which is also the only honest answer outside the
+/// TUI. Must match the fallback word in `maki-lua/src/api/session.rs`.
+const WOKEN: &str = "woken";
+const INJECTED: &str = "injected";
+const DELIVERED: &str = "delivered";
 
 /// Tabs carry their in-memory sessions so `/reload` reopens them without a
 /// disk round-trip; `session_has_content` tells which ones were saved.
@@ -108,6 +117,20 @@ impl SessionStatus {
             Self::NeedsInput => "needs_input",
             Self::Idle => "idle",
         }
+    }
+}
+
+/// What to tell the sender. `injected` is only for a session with a run in
+/// flight, where the message joins its next model call. An idle session that
+/// was not woken gets `delivered`: nothing will read it until it runs again,
+/// and calling that `injected` would overstate it.
+fn delivery_outcome(status: SessionStatus, woke: bool) -> &'static str {
+    if woke {
+        WOKEN
+    } else if status == SessionStatus::Idle {
+        DELIVERED
+    } else {
+        INJECTED
     }
 }
 
@@ -757,6 +780,39 @@ impl<'t> EventLoop<'t> {
                 }
                 let _ = reply_tx.send(Ok(json!(id)));
             }
+            SessionRequest::Notify {
+                id,
+                text,
+                from,
+                wake,
+            } => {
+                let reply = (|| {
+                    let session_id = parse_session_id(&id)?;
+                    // Liveness is the mailbox's to answer, not the runtime
+                    // list's. A session can hold a registered mailbox without
+                    // being one of ours — headless agents do — and `notify`
+                    // has always accepted those.
+                    SessionMailbox::notify(session_id, text, from.as_deref(), wake)
+                        .map_err(|e| e.to_string())?;
+                    let Some(idx) = self.position(session_id) else {
+                        return Ok(json!(DELIVERED));
+                    };
+                    // Claiming here is safe: `start_mailbox_runs` runs later in
+                    // this same frame and finds the flag already cleared. The
+                    // hazard is the mirror image — claiming and then failing to
+                    // dispatch would drop the messages on the floor.
+                    let status = SessionStatus::of(&self.sessions[idx].app);
+                    let claimed =
+                        claim_idle_wake(status, || self.sessions[idx].handles.claim_mailbox_wake());
+                    let Some(preamble) = claimed else {
+                        return Ok(json!(delivery_outcome(status, false)));
+                    };
+                    let actions = self.sessions[idx].app.start_mailbox_run(preamble);
+                    self.dispatch(idx, actions);
+                    Ok(json!(delivery_outcome(status, true)))
+                })();
+                let _ = reply_tx.send(reply);
+            }
             SessionRequest::Prompt { id, text } => {
                 let idx = match id {
                     None => Ok(self.focused),
@@ -1204,6 +1260,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+    use test_case::test_case;
 
     const OBSERVATION: &str = "failed";
     const SHELL_RESULT: &str = "command finished";
@@ -1233,6 +1290,14 @@ mod tests {
             assert!(preamble.is_none());
             assert!(!called.get());
         }
+    }
+
+    #[test_case(SessionStatus::Idle,       true,  WOKEN     ; "idle_and_woken")]
+    #[test_case(SessionStatus::Idle,       false, DELIVERED ; "idle_but_quiet")]
+    #[test_case(SessionStatus::Working,    false, INJECTED  ; "working")]
+    #[test_case(SessionStatus::NeedsInput, false, INJECTED  ; "parked_on_a_prompt")]
+    fn the_outcome_says_only_what_is_true(status: SessionStatus, woke: bool, expected: &str) {
+        assert_eq!(delivery_outcome(status, woke), expected);
     }
 
     #[test]
