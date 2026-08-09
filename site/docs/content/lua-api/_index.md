@@ -2638,7 +2638,14 @@ Starts a new session in the current project.
 
 - `{opts?}` (`table?`) Optional fields: prompt (string) first user message
 
-  to submit right away; focus (boolean) switch the UI to the new session.
+  to submit right away; focus (boolean) switch the UI to the new session;
+
+  - `model` (`string`) a model spec, or a tier name ("weak", "medium", "strong",
+
+  "compaction") resolved through the model roles. Defaults to the current
+
+
+  model, which is rarely what a background session wants.
 
 
 **Returns:** (`string|nil`, `string|nil`) New session id, or nil and an error.
@@ -2647,6 +2654,7 @@ Starts a new session in the current project.
 
 ```lua
 local id, err = maki.session.new({ prompt = "fix the tests", focus = true })
+local id, err = maki.session.new({ prompt = "review this", model = "weak" })
 ```
 
 ---

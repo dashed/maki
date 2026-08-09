@@ -92,21 +92,38 @@ async fn delete(
 /// Starts a new session in the current project.
 ///
 /// @param opts table? Optional fields: prompt (string) first user message
-///   to submit right away; focus (boolean) switch the UI to the new session.
+///   to submit right away; focus (boolean) switch the UI to the new session;
+///   model (string) a model spec, or a tier name ("weak", "medium", "strong",
+///   "compaction") resolved through the model roles. Defaults to the current
+///   model, which is rarely what a background session wants.
 /// @return (string|nil, string|nil) New session id, or nil and an error.
 /// @example
 /// local id, err = maki.session.new({ prompt = "fix the tests", focus = true })
+/// local id, err = maki.session.new({ prompt = "review this", model = "weak" })
 #[lua_fn]
 async fn new(
     lua: Lua,
     #[ctx] tx: Option<flume::Sender<UiAction>>,
     opts: Option<Table>,
 ) -> LuaResult<Pair<Value>> {
-    let (prompt, focus) = match opts {
-        Some(opts) => (opts.get("prompt")?, opts.get("focus").unwrap_or(false)),
-        None => (None, false),
+    let (prompt, focus, model) = match opts {
+        Some(opts) => (
+            opts.get("prompt")?,
+            opts.get("focus").unwrap_or(false),
+            opts.get("model")?,
+        ),
+        None => (None, false, None),
     };
-    roundtrip(lua, tx, SessionRequest::New { prompt, focus }).await
+    roundtrip(
+        lua,
+        tx,
+        SessionRequest::New {
+            prompt,
+            focus,
+            model,
+        },
+    )
+    .await
 }
 
 /// Sends {text} as a regular user prompt to a live session. The text is
@@ -302,6 +319,32 @@ mod tests {
     /// Without an event loop there is nobody to observe the outcome, but the
     /// message can still be delivered — so the send succeeds with the weaker
     /// word rather than failing.
+    #[test_case("return session.new({ model = 'weak' })", Some("weak") ; "tier_name")]
+    #[test_case("return session.new({ model = 'anthropic/claude-x' })", Some("anthropic/claude-x") ; "explicit_spec")]
+    #[test_case("return session.new({})", None ; "omitted_means_inherit")]
+    fn new_forwards_the_model(code: &str, expected: Option<&str>) {
+        let (tx, rx) = flume::unbounded::<UiAction>();
+        let lua = lua_with_session(Some(tx));
+        let expected = expected.map(str::to_owned);
+        let checker = std::thread::spawn(move || {
+            let Ok(UiAction::Session {
+                req: SessionRequest::New { model, .. },
+                reply_tx,
+            }) = rx.recv()
+            else {
+                panic!("expected new request");
+            };
+            assert_eq!(model, expected);
+            reply_tx.send(Ok(json!("new-id"))).unwrap();
+        });
+
+        let (_val, err): (Value, Option<String>) =
+            smol::block_on(lua.load(code).eval_async()).unwrap();
+
+        checker.join().unwrap();
+        assert_eq!(err, None);
+    }
+
     #[test]
     fn send_without_a_ui_falls_back_to_direct_delivery() {
         let id = MakiId::generate();

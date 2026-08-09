@@ -400,6 +400,8 @@ pub enum SessionRequest {
     New {
         prompt: Option<String>,
         focus: bool,
+        /// A concrete spec, or a tier name resolved through the model roles.
+        model: Option<String>,
     },
     Prompt {
         id: Option<String>,

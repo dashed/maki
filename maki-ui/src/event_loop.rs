@@ -56,6 +56,8 @@ const DRAIN_BUDGET: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
 const NOT_LIVE_ERR: &str = "session not live";
+const UNKNOWN_MODEL_ERR: &str = "unknown model or tier";
+const NO_TIER_MODEL_ERR: &str = "no model assigned to this role";
 /// How a message landed. `woken` and `injected` need a live runtime here;
 /// `delivered` is what a message gets when nothing is going to read it until
 /// the recipient runs again, which is also the only honest answer outside the
@@ -764,11 +766,21 @@ impl<'t> EventLoop<'t> {
             SessionRequest::Current => {
                 let _ = reply_tx.send(Ok(json!(self.sessions[self.focused].id())));
             }
-            SessionRequest::New { prompt, focus } => {
+            SessionRequest::New {
+                prompt,
+                focus,
+                model,
+            } => {
+                let spec = match self.resolve_spawn_spec(model) {
+                    Ok(spec) => spec,
+                    Err(e) => {
+                        let _ = reply_tx.send(Err(e));
+                        return;
+                    }
+                };
                 let session = {
-                    let slot = self.ctx.model_slot.load();
                     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                    AppSession::new(&slot.model.spec(), &cwd.to_string_lossy())
+                    AppSession::new(&spec, &cwd.to_string_lossy())
                 };
                 let idx = self.push_runtime(self.ctx.spawn_runtime(session));
                 let id = self.sessions[idx].id();
@@ -861,6 +873,26 @@ impl<'t> EventLoop<'t> {
             SubmitOutcome::Queued => Ok(json!("queued")),
             SubmitOutcome::Rejected(e) => Err(e.into()),
         }
+    }
+
+    /// A new session inherits the current model unless told otherwise, which
+    /// is the expensive default for a teammate: a reviewer does not need what
+    /// the lead is running. Tier names are accepted because that is how the
+    /// rest of maki names a model by intent rather than by version.
+    fn resolve_spawn_spec(&self, model: Option<String>) -> Result<String, String> {
+        let Some(model) = model else {
+            return Ok(self.ctx.model_slot.load().model.spec());
+        };
+        if let Ok(tier) = model.parse::<maki_providers::ModelTier>() {
+            return maki_providers::model_registry::model_registry()
+                .read()
+                .unwrap()
+                .spec_for_tier_any(tier)
+                .ok_or_else(|| format!("{NO_TIER_MODEL_ERR}: {model}"));
+        }
+        Model::from_spec(&model)
+            .map(|_| model.clone())
+            .map_err(|_| format!("{UNKNOWN_MODEL_ERR}: {model}"))
     }
 
     fn position(&self, id: MakiId) -> Option<usize> {
@@ -1290,6 +1322,26 @@ mod tests {
             assert!(preamble.is_none());
             assert!(!called.get());
         }
+    }
+
+    /// A typo must not quietly spawn a teammate on the lead's expensive model:
+    /// the whole point of the parameter is choosing a cheaper one.
+    #[test]
+    fn an_unknown_model_is_refused_rather_than_defaulted() {
+        assert!(
+            "not-a-real-model"
+                .parse::<maki_providers::ModelTier>()
+                .is_err()
+        );
+        assert!(Model::from_spec("not-a-real-model").is_err());
+    }
+
+    #[test_case("weak" ; "weak")]
+    #[test_case("medium" ; "medium")]
+    #[test_case("strong" ; "strong")]
+    #[test_case("compaction" ; "compaction")]
+    fn tier_names_resolve_as_tiers_not_specs(name: &str) {
+        assert!(name.parse::<maki_providers::ModelTier>().is_ok());
     }
 
     #[test_case(SessionStatus::Idle,       true,  WOKEN     ; "idle_and_woken")]
