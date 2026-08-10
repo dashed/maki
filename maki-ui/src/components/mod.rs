@@ -348,6 +348,9 @@ pub struct ToolRole {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayRole {
     User,
+    /// A message from outside this conversation. Distinct from `User` on
+    /// purpose: it must never read as the person at the keyboard.
+    Peer,
     Assistant,
     Thinking,
     Tool(Box<ToolRole>),
