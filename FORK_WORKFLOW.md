@@ -47,6 +47,12 @@ main (upstream)
 ├── alberto/modal-hints
 │   └── Say how to close pickers and modals
 │
+├── alberto/agent-teams
+│   └── Inter-session messaging, and the bundled `team` plugin
+│
+├── alberto/headless-ui-hang
+│   └── `maki.session.*` errored instead of hanging without a TUI
+│
 └── alberto/my-fork (integration merge)
     └── Combines all features + customizations
 ```
@@ -60,6 +66,8 @@ main (upstream)
 | `alberto/openrouter-auth` | OpenRouter built-in registration | 1 |
 | `alberto/effort-levels` | Effort levels, `/provider` routing, per-provider speed | 6 |
 | `alberto/modal-hints` | Close hints on pickers and modals | 1 |
+| `alberto/agent-teams` | Peer messaging, attribution, `team` plugin | 6 |
+| `alberto/headless-ui-hang` | Session calls answer instead of hanging | 1 |
 | `alberto/my-fork` | Combined features | merge |
 
 ### Retired Branches
@@ -67,6 +75,12 @@ main (upstream)
 | Branch | Reason | Date |
 |--------|--------|------|
 | — | — | — |
+
+### Renamed Branches
+
+| Was | Is | Why |
+|-----|-----|-----|
+| `alberto/step-boundary-mailbox` | `alberto/agent-teams` | Started as one fix to mailbox delivery and grew into the whole feature. Renamed 2026-08-10; PR #6 was closed in favour of a new one, because GitHub cannot repoint a pull request's head branch. |
 
 ## Design Notes
 
