@@ -24,7 +24,11 @@ pub enum InputFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "maki", version, about = "AI coding agent for the terminal")]
+#[command(
+    name = "maki",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"),
+    about = "AI coding agent for the terminal"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
