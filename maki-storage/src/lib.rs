@@ -11,6 +11,7 @@ pub mod paths;
 pub mod plans;
 pub mod sessions;
 pub mod theme;
+pub mod thinking;
 pub mod version;
 
 use std::fs;

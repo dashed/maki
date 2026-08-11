@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use super::{RetryInfo, Status};
 
 use crate::animation::spinner_frame;
+use crate::components::activity::Activity;
 use crate::theme;
 
 use maki_providers::{ModelPricing, TokenUsage, format_tokens};
@@ -15,6 +16,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+/// Shouted, unlike the lowercase advisory flags, and read by the test below so
+/// the two never drift.
+pub(crate) const YOLO_LABEL: &str = " [YOLO]";
 const FAST_LABEL: &str = " [fast]";
 const WORKFLOW_LABEL: &str = " [workflow]";
 
@@ -39,7 +43,9 @@ pub struct StatusBarContext<'a> {
     pub thinking_label: Option<Cow<'static, str>>,
     pub fast: bool,
     pub workflow: bool,
+    pub yolo: bool,
     pub restoring: bool,
+    pub activity: Option<Activity>,
 }
 
 pub struct StatusBar {
@@ -103,6 +109,12 @@ impl StatusBar {
         if *ctx.status == Status::Streaming {
             let ch = spinner_frame(self.started_at.elapsed().as_millis());
             left_spans.push(Span::styled(format!(" {ch}"), theme::current().spinner));
+            if let Some(activity) = ctx.activity {
+                left_spans.push(Span::styled(
+                    format!(" {}", activity.label(Instant::now())),
+                    theme::current().status_dim,
+                ));
+            }
         }
 
         if ctx.restoring {
@@ -114,6 +126,12 @@ impl StatusBar {
         }
 
         left_spans.push(Span::styled(format!(" {}", ctx.mode_label), ctx.mode_style));
+
+        // Beside the mode rather than with the dim flags on the right: this is
+        // the one setting where not noticing it costs something.
+        if ctx.yolo {
+            left_spans.push(Span::styled(YOLO_LABEL, theme::current().error));
+        }
 
         if let Some(name) = ctx.chat_name {
             left_spans.push(Span::styled(

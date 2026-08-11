@@ -533,6 +533,16 @@ pub enum AgentEvent {
     ThinkingDelta {
         text: String,
     },
+    /// A message reached this session from outside its own conversation —
+    /// another session, or a plugin calling `maki.session.notify`. Carried as
+    /// an event as well as a history entry, because an observation is hidden
+    /// from the transcript and would otherwise arrive invisibly.
+    MailboxMessage {
+        text: String,
+        /// Who the host attributed it to, when it was attributed at all. A
+        /// plugin notification has no sender.
+        from: Option<String>,
+    },
     ToolPending {
         id: String,
         name: String,

@@ -10,7 +10,7 @@ use self::segment::{Segment, SegmentCache, wrapped_line_count};
 use super::tool_display::{
     RenderCtx, ToolLines, append_annotation, append_right_info, assistant_style,
     build_instructions_lines, build_tool_lines, done_style, error_style, format_timestamp_now,
-    thinking_style, truncate_to_header, user_style,
+    peer_style, thinking_style, truncate_to_header, user_style,
 };
 use super::{
     DisplayMessage, DisplayRole, ToolRole, ToolStatus, apply_scroll_delta, code_view::SectionFlags,
@@ -1279,6 +1279,7 @@ impl MessagesPanel {
                 }
                 let style = match &msg.role {
                     DisplayRole::User => user_style(),
+                    DisplayRole::Peer => peer_style(),
                     DisplayRole::Assistant => assistant_style(),
                     DisplayRole::Thinking => thinking_style(),
                     DisplayRole::Error => error_style(),

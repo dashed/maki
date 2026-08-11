@@ -29,6 +29,9 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Enter` | Submit prompt |
 | `Shift+Enter` / `Ctrl+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
 | `Tab` | Toggle mode |
+| `Tab` | Use the top suggested follow-up prompt (when one is shown) |
+| `Ctrl+1..3` | Use a suggested follow-up prompt |
+| `Ctrl+0` | Show or hide the suggested follow-up prompts |
 | `/command` | Open command palette |
 | `Ctrl+W` | Delete word backward |
 | `Alt+←` / `Alt+→` | Move word left / right |
@@ -41,6 +44,10 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Ctrl+Q` | Pop queue |
 | `Esc Esc` | Rewind |
 | `Alt+O` | Edit input in external editor |
+| `Alt+I` | Improve the draft: edit it, or say how to reword it |
+| `Ctrl+L` | Complete the draft you are typing |
+| `→` | Accept the inline completion |
+| `Alt+→` | Accept one word of the inline completion |
 
 ### macOS-specific
 

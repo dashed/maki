@@ -81,6 +81,20 @@ impl Chat {
                 self.messages_panel.clear_prompt_progress();
                 self.messages_panel.text_delta(&text);
             }
+            AgentEvent::MailboxMessage { text, from } => {
+                // Flushed first for the same reason `show_user_message` does:
+                // otherwise the bubble lands a frame late, in the wrong row.
+                self.flush();
+                // The host writes the name, so the row cannot be made to
+                // claim a sender the message did not have.
+                let body = match from {
+                    Some(from) => format!("{from}: {text}"),
+                    None => text,
+                };
+                self.messages_panel
+                    .push(DisplayMessage::new(DisplayRole::Peer, body));
+                self.enable_auto_scroll();
+            }
             AgentEvent::ToolPending { id, name } => self.messages_panel.tool_pending(id, &name),
             AgentEvent::ToolStart(e) => self.messages_panel.tool_start(*e),
             AgentEvent::ToolOutput { id, content } => {
@@ -398,7 +412,16 @@ pub fn history_to_display(
     let mut display = Vec::new();
     let mut restore_items: Vec<maki_lua::RestoreItem> = Vec::new();
     for msg in messages {
+        // Shown on arrival, so it has to survive a reload too — otherwise a
+        // reply in the transcript answers a message that is no longer there.
         if msg.is_observation() {
+            if let Some(text) = msg.user_text() {
+                let body = match msg.observation_sender() {
+                    Some(from) => format!("{from}: {text}"),
+                    None => text.to_owned(),
+                };
+                display.push(DisplayMessage::new(DisplayRole::Peer, body));
+            }
             continue;
         }
         match msg.role {
@@ -747,8 +770,10 @@ mod tests {
         );
     }
 
+    /// Observations are shown on arrival, so a reload has to keep them —
+    /// otherwise the reply below answers a message that is no longer there.
     #[test]
-    fn history_hides_observations_but_keeps_the_reply() {
+    fn history_restores_an_observation_as_a_peer_bubble() {
         let msgs = vec![
             Message::observation("build failed".into()),
             Message {
@@ -760,9 +785,49 @@ mod tests {
             },
         ];
         let display = history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default()).0;
-        assert_eq!(display.len(), 1);
-        assert_eq!(display[0].role, DisplayRole::Assistant);
-        assert_eq!(display[0].text, "I will fix it");
+        assert_eq!(display.len(), 2);
+        assert_eq!(display[0].role, DisplayRole::Peer);
+        assert_eq!(display[0].text, "build failed");
+        assert_eq!(display[1].role, DisplayRole::Assistant);
+        assert_eq!(display[1].text, "I will fix it");
+    }
+
+    /// Not `User`: it did not come from the person at the keyboard, and the
+    /// role is what the renderer keys the prefix off.
+    #[test]
+    fn a_delivered_message_draws_a_peer_bubble() {
+        let mut chat = Chat::new(
+            "Main".into(),
+            UiConfig::default(),
+            maki_lua::EventHandle::disconnected_for_test(),
+        );
+        chat.handle_event(
+            AgentEvent::MailboxMessage {
+                text: "peer says hello".into(),
+                from: None,
+            },
+            None,
+        );
+        assert_eq!(chat.last_message_text(), "peer says hello");
+    }
+
+    /// The host writes the name, so a row cannot claim a sender the message
+    /// did not have.
+    #[test]
+    fn an_attributed_bubble_names_the_sender() {
+        let mut chat = Chat::new(
+            "Main".into(),
+            UiConfig::default(),
+            maki_lua::EventHandle::disconnected_for_test(),
+        );
+        chat.handle_event(
+            AgentEvent::MailboxMessage {
+                text: "build is green".into(),
+                from: Some("reviewer".into()),
+            },
+            None,
+        );
+        assert_eq!(chat.last_message_text(), "reviewer: build is green");
     }
 
     fn tool_use_pair(

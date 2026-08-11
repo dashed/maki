@@ -29,9 +29,8 @@ impl MessageQueue {
         self.shared = Some(shared);
     }
 
-    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.shared.as_ref().is_none_or(|s| s.is_empty())
+        self.len() == 0
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -229,7 +228,15 @@ impl App {
         self.run_id += 1;
         // New work supersedes text held for recovery after an agent error.
         self.recoverable_queue.clear();
+        // Suggestions belong to the turn that produced them. Dropped rather
+        // than hidden, so ctrl+0 cannot resurrect answers to an older question.
+        self.clear_suggestions();
         self.status = Status::Streaming;
+        self.activity = Some(crate::components::activity::Activity {
+            started: std::time::Instant::now(),
+            output_tokens: 0,
+            seed: self.run_id,
+        });
         self.fire_session_autocmd("TurnStart", serde_json::json!({}));
         if !display.is_empty() {
             self.main_chat().show_user_message(display);

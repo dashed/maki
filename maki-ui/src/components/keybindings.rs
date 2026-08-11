@@ -141,6 +141,16 @@ pub mod key {
     pub const DELETE_WORD: Bind = ctrl_bind!('w');
     pub const SEARCH: Bind = ctrl_bind!('f');
     pub const FILE_PICKER: Bind = ctrl_bind!('s');
+    /// The last free ctrl letter, and ctrl rather than alt because alt types
+    /// accented characters on a stock macOS terminal.
+    pub const COMPLETE: Bind = ctrl_bind!('l');
+    /// Sits with `Ctrl+1..3`, which pick a suggestion: same family, and every
+    /// ctrl letter was already spoken for.
+    pub const SHOW_SUGGESTIONS: Bind = Bind {
+        code: KeyCode::Char('0'),
+        modifiers: KeyModifiers::CONTROL,
+        label: "Ctrl+0",
+    };
     pub const OPEN_EDITOR: Bind = ctrl_bind!('o');
     pub const PLAN_TOGGLE: Bind = ctrl_bind!('t');
     pub const TASKS: Bind = ctrl_bind!('x');
@@ -154,6 +164,13 @@ pub mod key {
         code: KeyCode::Char('o'),
         modifiers: KeyModifiers::ALT,
         label: "Alt+O",
+    };
+    /// Sits beside `Alt+O`, the other way to work on a draft before sending
+    /// it. Alt rather than ctrl because every ctrl letter is spoken for.
+    pub const IMPROVE_PROMPT: Bind = Bind {
+        code: KeyCode::Char('i'),
+        modifiers: KeyModifiers::ALT,
+        label: "Alt+I",
     };
 }
 
@@ -379,6 +396,24 @@ pub const KEYBINDS: &[Keybind] = &[
         platform: Platform::All,
     },
     Keybind {
+        label: KeyLabel::Single("Tab"),
+        description: "Use the top suggested follow-up prompt (when one is shown)",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single("Ctrl+1..3"),
+        description: "Use a suggested follow-up prompt",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single(key::SHOW_SUGGESTIONS.label),
+        description: "Show or hide the suggested follow-up prompts",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
         label: KeyLabel::Single("/command"),
         description: "Open command palette",
         context: KeybindContext::Editing,
@@ -459,6 +494,30 @@ pub const KEYBINDS: &[Keybind] = &[
     Keybind {
         label: KeyLabel::Single(key::EDIT_INPUT.label),
         description: "Edit input in external editor",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single(key::IMPROVE_PROMPT.label),
+        description: "Improve the draft: edit it, or say how to reword it",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single(key::COMPLETE.label),
+        description: "Complete the draft you are typing",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single("→"),
+        description: "Accept the inline completion",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single("Alt+→"),
+        description: "Accept one word of the inline completion",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },

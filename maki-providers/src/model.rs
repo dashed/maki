@@ -9,7 +9,7 @@ use std::ops::AddAssign;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use maki_storage::sessions::{MIN_THINKING_BUDGET, StoredTokenUsage};
+use maki_storage::sessions::{Effort, MIN_THINKING_BUDGET, StoredTokenUsage};
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::{ManifestRegistry, ProviderManifest};
@@ -58,6 +58,17 @@ pub struct ModelInfo {
     pub tier: Option<ModelTier>,
     /// Store of additional metadata from the provider.
     pub provider_info: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+/// Which effort levels a model accepts and where it sits when nobody asks.
+/// OpenRouter publishes this per model; everyone else answers from their static
+/// dialect. Absent entirely for providers that steer thinking with token
+/// budgets (Google, llama.cpp, Ollama), where an effort level means nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffortOptions {
+    /// Ascending, never empty.
+    pub supported: Vec<Effort>,
+    pub default: Option<Effort>,
 }
 
 impl ModelInfo {
@@ -119,6 +130,18 @@ pub enum ModelTier {
     Medium,
     Strong,
     Compaction,
+    /// Drafts follow-up prompts between turns. Its own role because it wants a
+    /// model chosen for being cheap and quick, which is the opposite of what
+    /// the agent tiers are chosen for.
+    Suggest,
+}
+
+impl ModelTier {
+    /// Roles the agent itself runs on. The others are side jobs, and a model
+    /// holding one of those plus a real role should still report the real one.
+    pub const fn is_agent_tier(self) -> bool {
+        matches!(self, Self::Weak | Self::Medium | Self::Strong)
+    }
 }
 
 impl fmt::Display for ModelTier {
@@ -128,6 +151,7 @@ impl fmt::Display for ModelTier {
             Self::Medium => "medium",
             Self::Strong => "strong",
             Self::Compaction => "compaction",
+            Self::Suggest => "suggest",
         })
     }
 }
@@ -141,6 +165,7 @@ impl FromStr for ModelTier {
             "medium" => Ok(Self::Medium),
             "strong" => Ok(Self::Strong),
             "compaction" => Ok(Self::Compaction),
+            "suggest" => Ok(Self::Suggest),
             other => Err(ModelError::InvalidTier(other.to_string())),
         }
     }
